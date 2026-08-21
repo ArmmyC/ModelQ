@@ -24,6 +24,23 @@ source mapping.
 
 - Stable Rust 1.85 or newer
 
+## INT8 command
+
+The first end-to-end path accepts a SafeTensors file and writes a validated
+ModelQ-native INT8 SafeTensors file:
+
+```bash
+modelq quantize input.safetensors \
+  --format int8 \
+  --device cpu \
+  --output output.safetensors
+```
+
+The command reports per-tensor policy decisions, reconstruction diagnostics,
+and final byte accounting. It reopens and dequantizes the output before
+reporting success. Only the scalar CPU INT8 path is implemented; later
+formats, devices, and bounded chunk processing are not yet available.
+
 ## Local checks
 
 ```bash
