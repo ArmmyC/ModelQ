@@ -5,10 +5,11 @@ compiler and toolkit written in Rust. Its goal is to transform model
 checkpoints into smaller, explicitly described representations without running
 model inference.
 
-The repository is currently at the project-bootstrap stage. The binary and
-library module layout exist, but quantization, checkpoint I/O, and user-facing
-commands are not implemented yet. See [PROJECT.md](PROJECT.md) for the current
-project definition and implementation roadmap.
+The repository is in early development. It currently provides validated source
+tensor metadata and borrowed views for F32, F16, and BF16 data, but
+quantization, checkpoint I/O, and user-facing commands are not implemented yet.
+See [PROJECT.md](PROJECT.md) for the current project definition and
+implementation roadmap.
 
 ## Requirements
 
