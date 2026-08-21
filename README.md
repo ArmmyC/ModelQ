@@ -13,7 +13,10 @@ round-trip dequantization, plus streaming reconstruction and compression
 diagnostics. It also has a conservative, auditable policy for deciding which
 tensors enter the INT8 path. Later quantization formats, checkpoint writing,
 and most user-facing commands are not implemented yet. See [PROJECT.md](PROJECT.md)
-for the current project definition and implementation roadmap.
+for the current project definition and implementation roadmap. The planned
+ModelQ-native INT8 output convention is documented in
+[ADR 0002](docs/adr/0002-modelq-native-quantized-tensor-convention.md); the
+writer is not implemented yet.
 
 ## Requirements
 
