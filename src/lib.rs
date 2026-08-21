@@ -10,6 +10,5 @@ pub use modelq_io as io;
 pub use modelq_quant as quant;
 pub use modelq_quant::diagnostics;
 
-/// Reserved execution-backend boundary. A separate backend crate remains
-/// deferred until more than one execution implementation exists.
+/// Compatibility namespace for the portable CPU execution backend.
 pub mod backend;

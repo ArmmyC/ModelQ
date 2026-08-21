@@ -1,3 +1,3 @@
-//! Portable CPU execution support.
-//!
-//! CPU quantization behavior will be introduced with the reference algorithm.
+//! Compatibility reexports for the portable CPU execution backend.
+
+pub use modelq_backend::cpu::*;

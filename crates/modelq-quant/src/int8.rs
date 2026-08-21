@@ -89,6 +89,16 @@ pub enum QuantizationStreamError<E> {
 }
 
 impl QuantizedTensor {
+    /// Builds an INT8 tensor from already quantized values and a scale.
+    ///
+    /// The values and scale are validated with the same rules used by
+    /// [`dequantize`], making this constructor suitable for alternate
+    /// execution backends that produce the representation directly.
+    pub fn from_parts(values: Vec<i8>, scale: f32) -> Result<Self, Int8Error> {
+        validate_dequantization(values.iter().copied(), scale)?;
+        Ok(Self { values, scale })
+    }
+
     /// Returns the quantized values in storage order.
     pub fn values(&self) -> &[i8] {
         &self.values

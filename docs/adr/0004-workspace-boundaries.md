@@ -152,6 +152,13 @@ the end-to-end command and writer tests exercising the public facade rather
 than only testing private crate internals. CI continues to run the complete
 workspace on Ubuntu, Windows, and macOS.
 
+## Follow-up
+
+The backend deferral above describes the state at the Task 16 decision point.
+Task 17 introduced the second execution implementation and extracted the
+portable `modelq-backend` crate. Its current CPU boundary and bounded worker
+policy are documented in [ADR 0007](0007-cpu-parallel-dispatch.md).
+
 ## Consequences
 
 ### Benefits

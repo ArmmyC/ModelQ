@@ -113,6 +113,26 @@ pub struct QuantizedTensor {
 }
 
 impl QuantizedTensor {
+    /// Builds an INT4 tensor from its packed payload and group scales.
+    ///
+    /// The representation is validated with the same rules used by
+    /// [`dequantize`], making this constructor suitable for alternate
+    /// execution backends that produce packed bytes directly.
+    pub fn from_parts(
+        packed: Vec<u8>,
+        scales: Vec<f32>,
+        elements: usize,
+        group_size: usize,
+    ) -> Result<Self, Int4Error> {
+        validate_dequantization(&packed, &scales, elements, group_size)?;
+        Ok(Self {
+            packed,
+            scales,
+            elements,
+            group_size,
+        })
+    }
+
     /// Returns the packed bytes in storage order.
     pub fn packed_values(&self) -> &[u8] {
         &self.packed

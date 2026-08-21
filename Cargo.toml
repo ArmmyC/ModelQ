@@ -7,6 +7,7 @@ publish = false
 
 [workspace]
 members = [
+    "crates/modelq-backend",
     "crates/modelq-core",
     "crates/modelq-quant",
     "crates/modelq-io",
@@ -21,9 +22,14 @@ clap = { version = "=4.6.6", default-features = false, features = [
     "error-context",
     "suggestions",
 ] }
+modelq-backend = { path = "crates/modelq-backend" }
 modelq-core = { path = "crates/modelq-core" }
 modelq-io = { path = "crates/modelq-io" }
 modelq-quant = { path = "crates/modelq-quant" }
 
 [dev-dependencies]
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "cpu_parallel"
+harness = false

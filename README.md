@@ -14,14 +14,17 @@ compression diagnostics. It also has a conservative, auditable policy for
 deciding which tensors enter the INT8 path, plus a checked output layout
 planner. The CLI currently exposes only the INT8 path; sharded input,
 optimized formats, and most other user-facing commands are not implemented
-yet.
+yet. A portable `modelq-backend` crate now provides bounded parallel CPU
+library paths for INT8 and INT4; the scalar implementations remain the
+correctness reference, and the CLI still uses the bounded scalar writer path.
 See [PROJECT.md](PROJECT.md) for the current project definition and
 implementation roadmap. The planned ModelQ-native INT8 output convention is
 documented in
 [ADR 0002](docs/adr/0002-modelq-native-quantized-tensor-convention.md), and
 the streaming writer now implements that convention without changing the
 source mapping. The initial workspace boundary decision is documented in
-[ADR 0004](docs/adr/0004-workspace-boundaries.md).
+[ADR 0004](docs/adr/0004-workspace-boundaries.md), and the CPU parallel
+boundary is documented in [ADR 0007](docs/adr/0007-cpu-parallel-dispatch.md).
 
 ## Requirements
 
@@ -51,4 +54,5 @@ cargo build --workspace
 cargo test --workspace --all-targets
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo bench --bench cpu_parallel
 ```

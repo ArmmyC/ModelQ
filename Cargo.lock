@@ -88,10 +88,18 @@ name = "modelq"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "modelq-backend",
  "modelq-core",
  "modelq-io",
  "modelq-quant",
  "serde_json",
+]
+
+[[package]]
+name = "modelq-backend"
+version = "0.1.0"
+dependencies = [
+ "modelq-quant",
 ]
 
 [[package]]
