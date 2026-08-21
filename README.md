@@ -10,9 +10,10 @@ tensor metadata, borrowed views for F32, F16, and BF16 data, SafeTensors
 metadata inspection, and read-only memory-mapped views over those source
 tensors. It also includes a scalar symmetric INT8 reference quantizer with
 round-trip dequantization, plus streaming reconstruction and compression
-diagnostics. Later quantization formats, checkpoint writing, and most
-user-facing commands are not implemented yet. See [PROJECT.md](PROJECT.md) for
-the current project definition and implementation roadmap.
+diagnostics. It also has a conservative, auditable policy for deciding which
+tensors enter the INT8 path. Later quantization formats, checkpoint writing,
+and most user-facing commands are not implemented yet. See [PROJECT.md](PROJECT.md)
+for the current project definition and implementation roadmap.
 
 ## Requirements
 
