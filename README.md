@@ -6,10 +6,11 @@ checkpoints into smaller, explicitly described representations without running
 model inference.
 
 The repository is in early development. It currently provides validated source
-tensor metadata, borrowed views for F32, F16, and BF16 data, and SafeTensors
-metadata inspection. Quantization, checkpoint writing, and most user-facing
-commands are not implemented yet. See [PROJECT.md](PROJECT.md) for the current
-project definition and implementation roadmap.
+tensor metadata, borrowed views for F32, F16, and BF16 data, SafeTensors
+metadata inspection, and read-only memory-mapped views over those source
+tensors. Quantization, checkpoint writing, and most user-facing commands are
+not implemented yet. See [PROJECT.md](PROJECT.md) for the current project
+definition and implementation roadmap.
 
 ## Requirements
 

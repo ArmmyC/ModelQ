@@ -1,4 +1,4 @@
-//! SafeTensors metadata inspection.
+//! SafeTensors metadata inspection and read-only memory-mapped access.
 
 use std::{
     fmt,
@@ -8,7 +8,10 @@ use std::{
     str,
 };
 
+use memmap2::{Mmap, MmapOptions};
 use serde_json::Value;
+
+use crate::tensor::{DType, TensorView};
 
 const HEADER_LENGTH_BYTES: u64 = 8;
 const MAX_HEADER_SIZE: u64 = 100_000_000;
@@ -64,6 +67,15 @@ pub enum SafetensorsError {
         expected: u64,
         actual: u64,
     },
+    /// The requested tensor name was not present in the file metadata.
+    TensorNotFound { path: PathBuf, name: String },
+    /// The tensor is valid SafeTensors metadata but not yet supported by
+    /// ModelQ's source tensor view.
+    UnsupportedTensorDtype {
+        path: PathBuf,
+        name: String,
+        dtype: String,
+    },
 }
 
 impl fmt::Display for SafetensorsError {
@@ -111,6 +123,16 @@ impl fmt::Display for SafetensorsError {
                 "SafeTensors file {} has {actual} bytes but metadata requires {expected}",
                 path.display()
             ),
+            Self::TensorNotFound { path, name } => write!(
+                formatter,
+                "SafeTensors file {} has no tensor named {name:?}",
+                path.display()
+            ),
+            Self::UnsupportedTensorDtype { path, name, dtype } => write!(
+                formatter,
+                "tensor {name:?} in {} uses unsupported view dtype {dtype:?}",
+                path.display()
+            ),
         }
     }
 }
@@ -152,14 +174,7 @@ pub fn inspect_file(path: &Path) -> Result<Inspection, SafetensorsError> {
             path: path.to_owned(),
             source,
         })?;
-    let header_size = u64::from_le_bytes(header_length_bytes);
-
-    if header_size > MAX_HEADER_SIZE {
-        return Err(SafetensorsError::HeaderTooLarge {
-            path: path.to_owned(),
-            size: header_size,
-        });
-    }
+    let header_size = parse_header_size(path, header_length_bytes)?;
 
     let header_size_usize =
         usize::try_from(header_size).map_err(|_| SafetensorsError::InvalidHeaderLength {
@@ -172,7 +187,35 @@ pub fn inspect_file(path: &Path) -> Result<Inspection, SafetensorsError> {
             source,
         })?;
 
-    let header = str::from_utf8(&header).map_err(|source| SafetensorsError::InvalidHeaderUtf8 {
+    let tensors = parse_tensors(path, file_size, header_size, &header)?;
+
+    Ok(Inspection {
+        file_size,
+        tensors: tensors.into_iter().map(|tensor| tensor.summary).collect(),
+    })
+}
+
+fn parse_header_size(
+    path: &Path,
+    header_length_bytes: [u8; HEADER_LENGTH_BYTES as usize],
+) -> Result<u64, SafetensorsError> {
+    let header_size = u64::from_le_bytes(header_length_bytes);
+    if header_size > MAX_HEADER_SIZE {
+        return Err(SafetensorsError::HeaderTooLarge {
+            path: path.to_owned(),
+            size: header_size,
+        });
+    }
+    Ok(header_size)
+}
+
+fn parse_tensors(
+    path: &Path,
+    file_size: u64,
+    header_size: u64,
+    header: &[u8],
+) -> Result<Vec<RawTensor>, SafetensorsError> {
+    let header = str::from_utf8(header).map_err(|source| SafetensorsError::InvalidHeaderUtf8 {
         path: path.to_owned(),
         source,
     })?;
@@ -286,10 +329,7 @@ pub fn inspect_file(path: &Path) -> Result<Inspection, SafetensorsError> {
         });
     }
 
-    Ok(Inspection {
-        file_size,
-        tensors: tensors.into_iter().map(|tensor| tensor.summary).collect(),
-    })
+    Ok(tensors)
 }
 
 #[derive(Debug)]
@@ -297,6 +337,163 @@ struct RawTensor {
     summary: TensorSummary,
     start: u64,
     end: u64,
+}
+
+/// A read-only memory-mapped SafeTensors file.
+///
+/// The reader owns both the source [`File`] and its mapping. Tensor views
+/// borrow this reader, so the mapped bytes cannot outlive the file handle and
+/// mapping that back them. Metadata is parsed once during [`Self::open`]; no
+/// tensor payload is copied into an owned byte buffer.
+pub struct MappedSafetensors {
+    path: PathBuf,
+    file_size: u64,
+    data_start: usize,
+    tensors: Vec<RawTensor>,
+    /// Keeping the read-only source handle in the owner documents and enforces
+    /// the mapping lifetime relationship required by the mmap API.
+    _file: File,
+    mmap: Mmap,
+}
+
+impl MappedSafetensors {
+    /// Opens and validates a SafeTensors file while mapping its bytes read-only.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, SafetensorsError> {
+        let path = path.as_ref().to_owned();
+        let file = File::open(&path).map_err(|source| SafetensorsError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let file_size = file
+            .metadata()
+            .map_err(|source| SafetensorsError::Io {
+                path: path.clone(),
+                source,
+            })?
+            .len();
+        if file_size < HEADER_LENGTH_BYTES {
+            return Err(SafetensorsError::HeaderTooSmall { path });
+        }
+
+        // SAFETY: the mapping is read-only and the returned `Mmap` is stored
+        // alongside the source `File` in this owner. Callers must not mutate
+        // or truncate the file while a reader is open, which is the contract
+        // required by `memmap2` for a stable mapped range.
+        let mmap =
+            unsafe { MmapOptions::new().map(&file) }.map_err(|source| SafetensorsError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        if mmap.len() < HEADER_LENGTH_BYTES as usize {
+            return Err(SafetensorsError::HeaderTooSmall { path });
+        }
+
+        let header_length_bytes = mmap[..HEADER_LENGTH_BYTES as usize]
+            .try_into()
+            .expect("the mmap length was checked above");
+        let header_size = parse_header_size(&path, header_length_bytes)?;
+        let data_start_u64 = HEADER_LENGTH_BYTES
+            .checked_add(header_size)
+            .ok_or_else(|| SafetensorsError::InvalidHeaderLength { path: path.clone() })?;
+        let mapped_size = u64::try_from(mmap.len()).unwrap_or(u64::MAX);
+        if data_start_u64 > file_size || data_start_u64 > mapped_size {
+            return Err(SafetensorsError::MetadataIncompleteBuffer {
+                path,
+                expected: data_start_u64,
+                actual: file_size.min(mapped_size),
+            });
+        }
+        let data_start = usize::try_from(data_start_u64)
+            .map_err(|_| SafetensorsError::InvalidHeaderLength { path: path.clone() })?;
+        let header = &mmap[HEADER_LENGTH_BYTES as usize..data_start];
+        let tensors = parse_tensors(&path, file_size, header_size, header)?;
+
+        Ok(Self {
+            path,
+            file_size,
+            data_start,
+            tensors,
+            _file: file,
+            mmap,
+        })
+    }
+
+    /// Returns the total size of the mapped source file in bytes.
+    pub const fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    /// Returns the source path used to open this reader.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the validated tensor metadata in data-offset order.
+    pub fn tensors(&self) -> impl ExactSizeIterator<Item = &TensorSummary> {
+        self.tensors.iter().map(|tensor| &tensor.summary)
+    }
+
+    /// Returns an owned inspection summary without reading or copying payloads.
+    pub fn inspection(&self) -> Inspection {
+        Inspection {
+            file_size: self.file_size,
+            tensors: self
+                .tensors
+                .iter()
+                .map(|tensor| tensor.summary.clone())
+                .collect(),
+        }
+    }
+
+    /// Exposes one supported source tensor as a borrowed, mapped view.
+    pub fn tensor(&self, name: &str) -> Result<TensorView<'_>, SafetensorsError> {
+        let tensor = self
+            .tensors
+            .iter()
+            .find(|tensor| tensor.summary.name == name)
+            .ok_or_else(|| SafetensorsError::TensorNotFound {
+                path: self.path.clone(),
+                name: name.to_owned(),
+            })?;
+        let dtype = view_dtype(&tensor.summary.dtype).ok_or_else(|| {
+            SafetensorsError::UnsupportedTensorDtype {
+                path: self.path.clone(),
+                name: tensor.summary.name.clone(),
+                dtype: tensor.summary.dtype.clone(),
+            }
+        })?;
+        let start = usize::try_from(tensor.start)
+            .ok()
+            .and_then(|offset| self.data_start.checked_add(offset))
+            .ok_or_else(|| SafetensorsError::InvalidHeaderLength {
+                path: self.path.clone(),
+            })?;
+        let end = usize::try_from(tensor.end)
+            .ok()
+            .and_then(|offset| self.data_start.checked_add(offset))
+            .ok_or_else(|| SafetensorsError::InvalidHeaderLength {
+                path: self.path.clone(),
+            })?;
+        let data = self.mmap.get(start..end).ok_or_else(|| {
+            SafetensorsError::MetadataIncompleteBuffer {
+                path: self.path.clone(),
+                expected: u64::try_from(end).unwrap_or(u64::MAX),
+                actual: u64::try_from(self.mmap.len()).unwrap_or(u64::MAX),
+            }
+        })?;
+
+        TensorView::new(&tensor.summary.name, dtype, &tensor.summary.shape, data)
+            .map_err(|error| invalid_metadata(&self.path, error.to_string()))
+    }
+}
+
+fn view_dtype(dtype: &str) -> Option<DType> {
+    match dtype {
+        "F32" => Some(DType::F32),
+        "F16" => Some(DType::F16),
+        "BF16" => Some(DType::BF16),
+        _ => None,
+    }
 }
 
 fn invalid_metadata(path: &Path, message: impl Into<String>) -> SafetensorsError {
@@ -423,7 +620,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::inspect_file;
+    use super::{MappedSafetensors, inspect_file};
 
     struct TempFile(PathBuf);
 
@@ -454,16 +651,36 @@ mod tests {
                 "dtype": "F16",
                 "shape": [2, 2],
                 "data_offsets": [8, 16]
+            },
+            "bf16": {
+                "dtype": "BF16",
+                "shape": [2],
+                "data_offsets": [16, 20]
             }
         });
         let mut header = serde_json::to_vec(&header).expect("fixture metadata serializes");
         let padded_len = header.len().div_ceil(8) * 8;
         header.resize(padded_len, b' ');
 
-        let mut file = Vec::with_capacity(8 + padded_len + 16);
+        let bias = [1.25_f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let weight = [0xc000_u16, 0x3800, 0x3c00, 0x0000]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let bf16 = [0x3f80_u16, 0xc000]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut file = Vec::with_capacity(8 + padded_len + 20);
         file.extend_from_slice(&(padded_len as u64).to_le_bytes());
         file.extend_from_slice(&header);
-        file.extend_from_slice(&[0_u8; 16]);
+        file.extend_from_slice(&bias);
+        file.extend_from_slice(&weight);
+        file.extend_from_slice(&bf16);
         file
     }
 
@@ -473,7 +690,7 @@ mod tests {
 
         let inspection = inspect_file(&file.0).expect("fixture metadata is valid");
 
-        assert_eq!(inspection.tensors.len(), 2);
+        assert_eq!(inspection.tensors.len(), 3);
         assert_eq!(inspection.tensors[0].name, "bias");
         assert_eq!(inspection.tensors[0].dtype, "F32");
         assert_eq!(inspection.tensors[0].shape, [2]);
@@ -482,6 +699,44 @@ mod tests {
         assert_eq!(inspection.tensors[1].dtype, "F16");
         assert_eq!(inspection.tensors[1].shape, [2, 2]);
         assert_eq!(inspection.tensors[1].byte_len, 8);
+        assert_eq!(inspection.tensors[2].name, "bf16");
+        assert_eq!(inspection.tensors[2].dtype, "BF16");
+        assert_eq!(inspection.tensors[2].shape, [2]);
+        assert_eq!(inspection.tensors[2].byte_len, 4);
+    }
+
+    #[test]
+    fn maps_fixture_values_without_copying_payloads() {
+        let file = temp_file("mapped", synthetic_safetensors());
+
+        let reader = MappedSafetensors::open(&file.0).expect("fixture maps successfully");
+
+        assert_eq!(reader.file_size(), fs::metadata(&file.0).unwrap().len());
+        assert_eq!(reader.tensors().len(), 3);
+        assert_eq!(
+            reader
+                .tensor("bias")
+                .expect("f32 tensor is viewable")
+                .values()
+                .collect::<Vec<_>>(),
+            [1.25, -2.0]
+        );
+        assert_eq!(
+            reader
+                .tensor("weight")
+                .expect("f16 tensor is viewable")
+                .values()
+                .collect::<Vec<_>>(),
+            [-2.0, 0.5, 1.0, 0.0]
+        );
+        assert_eq!(
+            reader
+                .tensor("bf16")
+                .expect("bf16 tensor is viewable")
+                .values()
+                .collect::<Vec<_>>(),
+            [1.0, -2.0]
+        );
     }
 
     #[test]
