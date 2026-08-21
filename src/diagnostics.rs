@@ -6,7 +6,10 @@
 
 use std::fmt;
 
-use crate::quant::int8::{QuantizedTensor, SYMMETRIC_MAX, SYMMETRIC_MIN};
+use crate::quant::int8::{
+    Int8Error, QuantizationStreamError, QuantizedTensor, SYMMETRIC_MAX, SYMMETRIC_MIN,
+    quantize_replay_chunks_with_scale, scale_for,
+};
 
 /// Errors returned while calculating diagnostics.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +31,8 @@ pub enum DiagnosticsError {
     ElementCountOverflow,
     /// Adding quantized payload and overhead byte counts overflowed `u64`.
     ByteCountOverflow,
+    /// The bounded INT8 path rejected a source value or scale.
+    Quantization { source: Int8Error },
 }
 
 impl fmt::Display for DiagnosticsError {
@@ -54,11 +59,24 @@ impl fmt::Display for DiagnosticsError {
                 write!(formatter, "element count cannot be represented as u64")
             }
             Self::ByteCountOverflow => write!(formatter, "diagnostic byte count overflowed u64"),
+            Self::Quantization { source } => {
+                write!(
+                    formatter,
+                    "could not quantize values for diagnostics: {source}"
+                )
+            }
         }
     }
 }
 
-impl std::error::Error for DiagnosticsError {}
+impl std::error::Error for DiagnosticsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Quantization { source } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Reconstruction-quality metrics calculated in one streaming pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,82 +152,66 @@ pub fn reconstruction_metrics<I>(
 where
     I: IntoIterator<Item = f32>,
 {
+    reconstruction_metrics_streaming(source.iter().copied(), reconstructed)
+}
+
+/// Calculates reconstruction metrics from one-pass source and reconstructed
+/// iterators without collecting either sequence into a `Vec<f32>`.
+pub fn reconstruction_metrics_streaming<S, R>(
+    source: S,
+    reconstructed: R,
+) -> Result<ReconstructionMetrics, DiagnosticsError>
+where
+    S: IntoIterator<Item = f32>,
+    R: IntoIterator<Item = f32>,
+{
+    let mut source = source.into_iter();
     let mut reconstructed = reconstructed.into_iter();
-    let mut squared_error_sum = 0.0_f64;
-    let mut absolute_error_sum = 0.0_f64;
-    let mut source_energy = 0.0_f64;
-    let mut max_abs_error = 0.0_f64;
+    let mut accumulator = MetricsAccumulator::default();
 
-    for (index, &source_value) in source.iter().enumerate() {
-        if !source_value.is_finite() {
-            return Err(DiagnosticsError::NonFiniteSource {
-                index,
-                value: source_value,
-            });
+    loop {
+        match (source.next(), reconstructed.next()) {
+            (Some(source_value), Some(reconstructed_value)) => {
+                accumulator.push(source_value, reconstructed_value)?;
+            }
+            (None, None) => return accumulator.finish(),
+            (Some(_), None) => {
+                let source_len = accumulator
+                    .elements
+                    .saturating_add(1)
+                    .saturating_add(source.count());
+                return Err(DiagnosticsError::LengthMismatch {
+                    source_len,
+                    reconstructed_len: accumulator.elements,
+                });
+            }
+            (None, Some(_)) => {
+                let reconstructed_len = accumulator
+                    .elements
+                    .saturating_add(1)
+                    .saturating_add(reconstructed.count());
+                return Err(DiagnosticsError::LengthMismatch {
+                    source_len: accumulator.elements,
+                    reconstructed_len,
+                });
+            }
         }
-        let Some(reconstructed_value) = reconstructed.next() else {
-            return Err(DiagnosticsError::LengthMismatch {
-                source_len: source.len(),
-                reconstructed_len: index,
-            });
-        };
-        if !reconstructed_value.is_finite() {
-            return Err(DiagnosticsError::NonFiniteReconstructed {
-                index,
-                value: reconstructed_value,
-            });
-        }
-
-        let source_value = f64::from(source_value);
-        let reconstructed_value = f64::from(reconstructed_value);
-        let absolute_error = (source_value - reconstructed_value).abs();
-        squared_error_sum += absolute_error * absolute_error;
-        absolute_error_sum += absolute_error;
-        source_energy += source_value * source_value;
-        max_abs_error = max_abs_error.max(absolute_error);
     }
-
-    if reconstructed.next().is_some() {
-        let mut reconstructed_len = source.len().saturating_add(1);
-        for _ in reconstructed {
-            reconstructed_len = reconstructed_len.saturating_add(1);
-        }
-        return Err(DiagnosticsError::LengthMismatch {
-            source_len: source.len(),
-            reconstructed_len,
-        });
-    }
-
-    let elements =
-        u64::try_from(source.len()).map_err(|_| DiagnosticsError::ElementCountOverflow)?;
-    let elements_f64 = elements as f64;
-    let mse = if elements == 0 {
-        0.0
-    } else {
-        squared_error_sum / elements_f64
-    };
-    let mae = if elements == 0 {
-        0.0
-    } else {
-        absolute_error_sum / elements_f64
-    };
-    let sqnr_db = (source_energy > 0.0 && squared_error_sum > 0.0)
-        .then(|| 10.0 * (source_energy / squared_error_sum).log10());
-
-    Ok(ReconstructionMetrics {
-        elements,
-        mse,
-        mae,
-        max_abs_error,
-        sqnr_db,
-    })
 }
 
 /// Counts values that reached either endpoint of the symmetric INT8 range.
 pub fn saturation_count(values: &[i8]) -> u64 {
+    saturation_count_iter(values.iter().copied())
+}
+
+/// Counts saturated values from a one-pass quantized iterator.
+pub fn saturation_count_iter<I>(values: I) -> u64
+where
+    I: IntoIterator<Item = i8>,
+{
     values
-        .iter()
-        .filter(|&&value| value == SYMMETRIC_MIN || value == SYMMETRIC_MAX)
+        .into_iter()
+        .filter(|&value| value == SYMMETRIC_MIN || value == SYMMETRIC_MAX)
         .count() as u64
 }
 
@@ -266,13 +268,161 @@ pub fn int8_tensor_diagnostics(
     })
 }
 
+/// Calculates INT8 diagnostics with bounded replay processing.
+///
+/// The value factory is called once to compute the per-tensor scale and once
+/// to process bounded quantized chunks. Source and reconstructed values never
+/// need a whole-tensor `Vec<f32>` allocation.
+pub fn int8_tensor_diagnostics_replay<F, I>(
+    mut values: F,
+    chunk_size: usize,
+    source_bytes: u64,
+    scale_bytes: u64,
+) -> Result<(f32, TensorDiagnostics), DiagnosticsError>
+where
+    F: FnMut() -> I,
+    I: IntoIterator<Item = f32>,
+{
+    let scale = scale_for(values()).map_err(|source| DiagnosticsError::Quantization { source })?;
+    let mut source_values = values().into_iter();
+    let mut accumulator = MetricsAccumulator::default();
+    let mut quantized_payload_bytes = 0_u64;
+    let mut saturated_values = 0_u64;
+
+    let stream_result = quantize_replay_chunks_with_scale(
+        &mut values,
+        scale,
+        chunk_size,
+        |chunk| -> Result<(), DiagnosticsError> {
+            for &quantized in chunk {
+                let Some(source_value) = source_values.next() else {
+                    return Err(DiagnosticsError::LengthMismatch {
+                        source_len: accumulator.elements,
+                        reconstructed_len: accumulator.elements.saturating_add(1),
+                    });
+                };
+                accumulator.push(source_value, f32::from(quantized) * scale)?;
+                quantized_payload_bytes = quantized_payload_bytes
+                    .checked_add(1)
+                    .ok_or(DiagnosticsError::ByteCountOverflow)?;
+                if quantized == SYMMETRIC_MIN || quantized == SYMMETRIC_MAX {
+                    saturated_values = saturated_values.saturating_add(1);
+                }
+            }
+            Ok(())
+        },
+    );
+    match stream_result {
+        Ok(()) => {}
+        Err(QuantizationStreamError::Quantization(source)) => {
+            return Err(DiagnosticsError::Quantization { source });
+        }
+        Err(QuantizationStreamError::Callback(source)) => return Err(source),
+    }
+
+    if source_values.next().is_some() {
+        let source_len = accumulator
+            .elements
+            .saturating_add(1)
+            .saturating_add(source_values.count());
+        return Err(DiagnosticsError::LengthMismatch {
+            source_len,
+            reconstructed_len: accumulator.elements,
+        });
+    }
+
+    let metrics = accumulator.finish()?;
+    let accounting = compression_accounting(source_bytes, quantized_payload_bytes, scale_bytes)?;
+    Ok((
+        scale,
+        TensorDiagnostics {
+            elements: metrics.elements,
+            source_bytes,
+            quantized_bytes: accounting.total_quantized_bytes,
+            mse: metrics.mse,
+            mae: metrics.mae,
+            max_abs_error: metrics.max_abs_error,
+            sqnr_db: metrics.sqnr_db,
+            saturated_values,
+        },
+    ))
+}
+
+#[derive(Default)]
+struct MetricsAccumulator {
+    elements: usize,
+    squared_error_sum: f64,
+    absolute_error_sum: f64,
+    source_energy: f64,
+    max_abs_error: f64,
+}
+
+impl MetricsAccumulator {
+    fn push(
+        &mut self,
+        source_value: f32,
+        reconstructed_value: f32,
+    ) -> Result<(), DiagnosticsError> {
+        let index = self.elements;
+        if !source_value.is_finite() {
+            return Err(DiagnosticsError::NonFiniteSource {
+                index,
+                value: source_value,
+            });
+        }
+        if !reconstructed_value.is_finite() {
+            return Err(DiagnosticsError::NonFiniteReconstructed {
+                index,
+                value: reconstructed_value,
+            });
+        }
+
+        let source_value = f64::from(source_value);
+        let reconstructed_value = f64::from(reconstructed_value);
+        let absolute_error = (source_value - reconstructed_value).abs();
+        self.squared_error_sum += absolute_error * absolute_error;
+        self.absolute_error_sum += absolute_error;
+        self.source_energy += source_value * source_value;
+        self.max_abs_error = self.max_abs_error.max(absolute_error);
+        self.elements = self.elements.saturating_add(1);
+        Ok(())
+    }
+
+    fn finish(self) -> Result<ReconstructionMetrics, DiagnosticsError> {
+        let elements =
+            u64::try_from(self.elements).map_err(|_| DiagnosticsError::ElementCountOverflow)?;
+        let elements_f64 = elements as f64;
+        let mse = if elements == 0 {
+            0.0
+        } else {
+            self.squared_error_sum / elements_f64
+        };
+        let mae = if elements == 0 {
+            0.0
+        } else {
+            self.absolute_error_sum / elements_f64
+        };
+        let sqnr_db = (self.source_energy > 0.0 && self.squared_error_sum > 0.0)
+            .then(|| 10.0 * (self.source_energy / self.squared_error_sum).log10());
+
+        Ok(ReconstructionMetrics {
+            elements,
+            mse,
+            mae,
+            max_abs_error: self.max_abs_error,
+            sqnr_db,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticsError, compression_accounting, int8_tensor_diagnostics, reconstruction_metrics,
+        DiagnosticsError, compression_accounting, int8_tensor_diagnostics,
+        int8_tensor_diagnostics_replay, reconstruction_metrics, reconstruction_metrics_streaming,
         saturation_count,
     };
-    use crate::quant::int8::quantize;
+    use crate::quant::int8::{DEFAULT_CHUNK_ELEMENTS, quantize};
 
     #[test]
     fn calculates_hand_checked_reconstruction_metrics() {
@@ -359,5 +509,43 @@ mod tests {
         assert!(diagnostics.mae > 0.0);
         assert!(diagnostics.max_abs_error > 0.0);
         assert_eq!(diagnostics.compression_ratio(), Some(20.0 / 9.0));
+    }
+
+    #[test]
+    fn replay_diagnostics_match_reference_for_a_large_tensor() {
+        let source = (0..DEFAULT_CHUNK_ELEMENTS + 19)
+            .map(|index| (index as f32 - 300.0) / 17.0)
+            .collect::<Vec<_>>();
+        let quantized = quantize(&source).expect("the generated values are finite");
+        let reference = int8_tensor_diagnostics(&source, &quantized, (source.len() * 4) as u64, 4)
+            .expect("the reference diagnostics are valid");
+        let (scale, replayed) = int8_tensor_diagnostics_replay(
+            || source.iter().copied(),
+            257,
+            (source.len() * 4) as u64,
+            4,
+        )
+        .expect("bounded diagnostics are valid");
+
+        assert_eq!(scale, quantized.scale());
+        assert_eq!(replayed, reference);
+        assert_eq!(
+            reconstruction_metrics_streaming(
+                source.iter().copied(),
+                quantized
+                    .values()
+                    .iter()
+                    .map(|&value| f32::from(value) * quantized.scale()),
+            )
+            .expect("streaming metrics are valid"),
+            reconstruction_metrics(
+                &source,
+                quantized
+                    .values()
+                    .iter()
+                    .map(|&value| f32::from(value) * quantized.scale()),
+            )
+            .expect("reference metrics are valid")
+        );
     }
 }

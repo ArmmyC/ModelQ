@@ -5,7 +5,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use modelq::io::safetensors::{MappedSafetensors, inspect_file};
+use modelq::{
+    io::safetensors::{MappedSafetensors, inspect_file},
+    quant::int8::{DEFAULT_CHUNK_ELEMENTS, quantize},
+};
 use serde_json::json;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -37,7 +40,7 @@ impl Drop for TempPath {
 }
 
 fn large_source() -> Vec<u8> {
-    const ELEMENTS: usize = 2048;
+    const ELEMENTS: usize = DEFAULT_CHUNK_ELEMENTS + 123;
     let weight_end = 3 + ELEMENTS * 4;
     let header = json!({
         "ids": {
@@ -98,8 +101,36 @@ fn quantize_command_writes_smaller_validated_output() {
 
     let output = MappedSafetensors::open(output_path.path()).expect("output reopens");
     assert_eq!(output.tensor_bytes("ids").unwrap(), [1, 2, 3]);
-    assert_eq!(output.tensor_bytes("weight.qdata").unwrap().len(), 2048);
+    let source = MappedSafetensors::open(source_path.path()).expect("source reopens");
+    let source_values = source
+        .tensor("weight")
+        .expect("the generated weight is viewable")
+        .values()
+        .collect::<Vec<_>>();
+    let reference = quantize(&source_values).expect("the generated values are finite");
+    assert_eq!(
+        output.tensor_bytes("weight.qdata").unwrap(),
+        reference
+            .values()
+            .iter()
+            .map(|&value| value as u8)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        output.tensor_bytes("weight.qdata").unwrap().len(),
+        DEFAULT_CHUNK_ELEMENTS + 123
+    );
     assert_eq!(output.tensor_bytes("weight.scale").unwrap().len(), 4);
+    assert_eq!(
+        f32::from_le_bytes(
+            output
+                .tensor_bytes("weight.scale")
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
+        reference.scale()
+    );
     assert_eq!(
         fs::read(source_path.path()).expect("source can be reread"),
         source_bytes

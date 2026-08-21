@@ -2,14 +2,16 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use clap::{Arg, ArgMatches, Command, value_parser};
 use modelq::{
-    diagnostics::{int8_tensor_diagnostics, reconstruction_metrics, saturation_count},
+    diagnostics::{
+        int8_tensor_diagnostics_replay, reconstruction_metrics_streaming, saturation_count_iter,
+    },
     io::{
         layout::{OutputTensorRole, plan_output_layout},
         safetensors::{Inspection, MappedSafetensors, TensorSummary, inspect_file},
         writer::write_safetensors,
     },
     quant::{
-        int8::{dequantize, quantize},
+        int8::{DEFAULT_CHUNK_ELEMENTS, validate_dequantization},
         policy::{PolicyAction, QuantizationPolicy, TensorCandidate, TensorDecision},
     },
 };
@@ -228,11 +230,13 @@ fn print_progress(
                 let view = source
                     .tensor(&summary.name)
                     .map_err(|error| error.to_string())?;
-                let values = view.values().collect::<Vec<_>>();
-                let quantized = quantize(&values)
-                    .map_err(|error| format!("could not quantize {:?}: {error}", summary.name))?;
-                let diagnostics = int8_tensor_diagnostics(&values, &quantized, summary.byte_len, 4)
-                    .map_err(|error| format!("could not diagnose {:?}: {error}", summary.name))?;
+                let (scale, diagnostics) = int8_tensor_diagnostics_replay(
+                    || view.values(),
+                    DEFAULT_CHUNK_ELEMENTS,
+                    summary.byte_len,
+                    4,
+                )
+                .map_err(|error| format!("could not diagnose {:?}: {error}", summary.name))?;
                 println!(
                     "Progress: {}/{} | {} | quantize | mse={:.3e} | mae={:.3e} | scale={:.6e}",
                     index + 1,
@@ -240,7 +244,7 @@ fn print_progress(
                     summary.name,
                     diagnostics.mse,
                     diagnostics.mae,
-                    quantized.scale()
+                    scale
                 );
             }
         }
@@ -294,17 +298,12 @@ fn validate_output(
                 report.preserved_tensors += 1;
             }
             OutputTensorRole::QuantizedData => {
-                let source_values = source
+                let source_view = source
                     .tensor(&tensor.source_name)
-                    .map_err(|error| error.to_string())?
-                    .values()
-                    .collect::<Vec<_>>();
+                    .map_err(|error| error.to_string())?;
                 let qdata = output
                     .tensor_bytes(&tensor.name)
-                    .map_err(|error| error.to_string())?
-                    .iter()
-                    .map(|&value| value as i8)
-                    .collect::<Vec<_>>();
+                    .map_err(|error| error.to_string())?;
                 let scale_name = format!("{}.scale", tensor.source_name);
                 let scale_tensor = plan
                     .tensor(&scale_name)
@@ -326,12 +325,19 @@ fn validate_output(
                         .try_into()
                         .expect("the scale length was checked above"),
                 );
-                let reconstructed = dequantize(&qdata, scale)
+                validate_dequantization(qdata.iter().copied().map(|value| value as i8), scale)
                     .map_err(|error| format!("could not dequantize {:?}: {error}", tensor.name))?;
-                let metrics = reconstruction_metrics(&source_values, reconstructed)
-                    .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
+                let metrics = reconstruction_metrics_streaming(
+                    source_view.values(),
+                    qdata
+                        .iter()
+                        .copied()
+                        .map(|value| f32::from(value as i8) * scale),
+                )
+                .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
                 report.quantized_tensors += 1;
-                report.saturated_values += saturation_count(&qdata);
+                report.saturated_values +=
+                    saturation_count_iter(qdata.iter().copied().map(|value| value as i8));
                 report.max_mse = report.max_mse.max(metrics.mse);
                 report.max_mae = report.max_mae.max(metrics.mae);
                 report.max_abs_error = report.max_abs_error.max(metrics.max_abs_error);

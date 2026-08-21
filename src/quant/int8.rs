@@ -10,6 +10,9 @@ pub const SYMMETRIC_MIN: i8 = -127;
 /// The highest value emitted by the symmetric INT8 representation.
 pub const SYMMETRIC_MAX: i8 = 127;
 
+/// Default number of elements held by the bounded scalar processing path.
+pub const DEFAULT_CHUNK_ELEMENTS: usize = 16 * 1024;
+
 const DEFAULT_ZERO_SCALE: f32 = 1.0;
 
 /// Errors returned by the scalar INT8 reference implementation.
@@ -27,6 +30,8 @@ pub enum Int8Error {
     /// input. This should only be reachable for an invalid floating-point
     /// implementation or an unexpectedly extreme input.
     QuantizedValueOverflow { index: usize },
+    /// A bounded quantization call was given no room for an output chunk.
+    InvalidChunkSize { chunk_size: usize },
 }
 
 impl fmt::Display for Int8Error {
@@ -54,6 +59,12 @@ impl fmt::Display for Int8Error {
             Self::QuantizedValueOverflow { index } => {
                 write!(formatter, "scaled value at index {index} is not finite")
             }
+            Self::InvalidChunkSize { chunk_size } => {
+                write!(
+                    formatter,
+                    "quantization chunk size must be positive: {chunk_size}"
+                )
+            }
         }
     }
 }
@@ -65,6 +76,16 @@ impl std::error::Error for Int8Error {}
 pub struct QuantizedTensor {
     values: Vec<i8>,
     scale: f32,
+}
+
+/// Error returned by the bounded replay path when either quantization or its
+/// output callback fails.
+#[derive(Debug)]
+pub enum QuantizationStreamError<E> {
+    /// The source value or scale could not be quantized.
+    Quantization(Int8Error),
+    /// The caller's chunk callback failed.
+    Callback(E),
 }
 
 impl QuantizedTensor {
@@ -110,8 +131,26 @@ impl QuantizedTensor {
 /// zero, and then clamped to the defined symmetric range. Empty and all-zero
 /// inputs use a scale of `1.0`, so their dequantized values remain zero.
 pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Int8Error> {
-    let mut max_abs = 0.0_f32;
+    let scale = scale_for(values.iter().copied())?;
+
+    let mut quantized = Vec::with_capacity(values.len());
     for (index, &value) in values.iter().enumerate() {
+        quantized.push(quantize_value(value, scale, index)?);
+    }
+
+    Ok(QuantizedTensor {
+        values: quantized,
+        scale,
+    })
+}
+
+/// Computes the symmetric per-tensor scale from a one-pass value iterator.
+pub fn scale_for<I>(values: I) -> Result<f32, Int8Error>
+where
+    I: IntoIterator<Item = f32>,
+{
+    let mut max_abs = 0.0_f32;
+    for (index, value) in values.into_iter().enumerate() {
         if !value.is_finite() {
             return Err(Int8Error::NonFiniteInput { index, value });
         }
@@ -129,37 +168,92 @@ pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Int8Error> {
     if scale == 0.0 {
         scale = f32::from_bits(1);
     }
+    Ok(scale)
+}
 
-    let mut quantized = Vec::with_capacity(values.len());
-    for (index, &value) in values.iter().enumerate() {
-        let scaled = value / scale;
-        if !scaled.is_finite() {
-            return Err(Int8Error::QuantizedValueOverflow { index });
-        }
-        let rounded = scaled.round();
-        let clamped = rounded.clamp(f32::from(SYMMETRIC_MIN), f32::from(SYMMETRIC_MAX));
-        quantized.push(clamped as i8);
+/// Quantizes one value with a previously computed symmetric scale.
+pub fn quantize_value(value: f32, scale: f32, index: usize) -> Result<i8, Int8Error> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(Int8Error::InvalidScale { scale });
     }
+    if !value.is_finite() {
+        return Err(Int8Error::NonFiniteInput { index, value });
+    }
+    let scaled = value / scale;
+    if !scaled.is_finite() {
+        return Err(Int8Error::QuantizedValueOverflow { index });
+    }
+    let rounded = scaled.round();
+    let clamped = rounded.clamp(f32::from(SYMMETRIC_MIN), f32::from(SYMMETRIC_MAX));
+    Ok(clamped as i8)
+}
 
-    Ok(QuantizedTensor {
-        values: quantized,
-        scale,
-    })
+/// Computes one tensor scale and emits its quantized values in bounded chunks.
+///
+/// `values` is a replayable factory: it is called once to compute the global
+/// scale and once to produce quantized chunks. The callback must consume each
+/// borrowed chunk before returning; the next chunk reuses the same bounded
+/// allocation. No source or reconstructed `Vec<f32>` is created.
+pub fn quantize_replay_chunks<F, I, C, E>(
+    mut values: F,
+    chunk_size: usize,
+    emit: C,
+) -> Result<f32, QuantizationStreamError<E>>
+where
+    F: FnMut() -> I,
+    I: IntoIterator<Item = f32>,
+    C: FnMut(&[i8]) -> Result<(), E>,
+{
+    if chunk_size == 0 {
+        return Err(QuantizationStreamError::Quantization(
+            Int8Error::InvalidChunkSize { chunk_size },
+        ));
+    }
+    let scale = scale_for(values()).map_err(QuantizationStreamError::Quantization)?;
+    quantize_replay_chunks_with_scale(&mut values, scale, chunk_size, emit)?;
+    Ok(scale)
+}
+
+/// Emits bounded quantized chunks using a caller-provided scale.
+pub fn quantize_replay_chunks_with_scale<F, I, C, E>(
+    values: &mut F,
+    scale: f32,
+    chunk_size: usize,
+    mut emit: C,
+) -> Result<(), QuantizationStreamError<E>>
+where
+    F: FnMut() -> I,
+    I: IntoIterator<Item = f32>,
+    C: FnMut(&[i8]) -> Result<(), E>,
+{
+    if chunk_size == 0 {
+        return Err(QuantizationStreamError::Quantization(
+            Int8Error::InvalidChunkSize { chunk_size },
+        ));
+    }
+    let mut chunk = Vec::with_capacity(chunk_size);
+    for (index, value) in values().into_iter().enumerate() {
+        chunk.push(
+            quantize_value(value, scale, index).map_err(QuantizationStreamError::Quantization)?,
+        );
+        if chunk.len() == chunk_size {
+            emit(&chunk).map_err(QuantizationStreamError::Callback)?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        emit(&chunk).map_err(QuantizationStreamError::Callback)?;
+    }
+    Ok(())
 }
 
 /// Dequantizes symmetric INT8 values with a caller-provided scale.
 pub fn dequantize(values: &[i8], scale: f32) -> Result<Vec<f32>, Int8Error> {
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(Int8Error::InvalidScale { scale });
-    }
-
+    validate_dequantization(values.iter().copied(), scale)?;
     values
         .iter()
         .enumerate()
         .map(|(index, &value)| {
-            if !(SYMMETRIC_MIN..=SYMMETRIC_MAX).contains(&value) {
-                return Err(Int8Error::QuantizedValueOutOfRange { index, value });
-            }
             let reconstructed = f32::from(value) * scale;
             if !reconstructed.is_finite() {
                 return Err(Int8Error::DequantizedValueOverflow { index });
@@ -169,9 +263,33 @@ pub fn dequantize(values: &[i8], scale: f32) -> Result<Vec<f32>, Int8Error> {
         .collect()
 }
 
+/// Validates quantized values and their scale without allocating a
+/// reconstructed value buffer.
+pub fn validate_dequantization<I>(values: I, scale: f32) -> Result<(), Int8Error>
+where
+    I: IntoIterator<Item = i8>,
+{
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(Int8Error::InvalidScale { scale });
+    }
+    for (index, value) in values.into_iter().enumerate() {
+        if !(SYMMETRIC_MIN..=SYMMETRIC_MAX).contains(&value) {
+            return Err(Int8Error::QuantizedValueOutOfRange { index, value });
+        }
+        let reconstructed = f32::from(value) * scale;
+        if !reconstructed.is_finite() {
+            return Err(Int8Error::DequantizedValueOverflow { index });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Int8Error, SYMMETRIC_MAX, SYMMETRIC_MIN, dequantize, quantize};
+    use super::{
+        DEFAULT_CHUNK_ELEMENTS, Int8Error, QuantizationStreamError, SYMMETRIC_MAX, SYMMETRIC_MIN,
+        dequantize, quantize, quantize_replay_chunks,
+    };
 
     #[test]
     fn quantizes_zero_tensor_without_a_zero_scale() {
@@ -256,5 +374,36 @@ mod tests {
         assert_eq!(quantized.len(), 0);
         assert_eq!(quantized.scale(), 1.0);
         assert!(quantized.dequantize().is_empty());
+    }
+
+    #[test]
+    fn replay_chunks_match_reference_for_a_large_tensor() {
+        let values = (0..DEFAULT_CHUNK_ELEMENTS + 37)
+            .map(|index| (index as f32 - 512.0) / 31.0)
+            .collect::<Vec<_>>();
+        let reference = quantize(&values).expect("the generated values are finite");
+        let mut chunks = Vec::new();
+        let scale = quantize_replay_chunks(
+            || values.iter().copied(),
+            127,
+            |chunk| {
+                chunks.extend_from_slice(chunk);
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("bounded replay quantization succeeds");
+
+        assert_eq!(scale, reference.scale());
+        assert_eq!(chunks, reference.values());
+    }
+
+    #[test]
+    fn rejects_zero_replay_chunk_size() {
+        let error = quantize_replay_chunks(|| [1.0_f32].into_iter(), 0, |_| Ok::<(), ()>(()))
+            .expect_err("zero-sized chunks are invalid");
+        assert!(matches!(
+            error,
+            QuantizationStreamError::Quantization(Int8Error::InvalidChunkSize { chunk_size: 0 })
+        ));
     }
 }

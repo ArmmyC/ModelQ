@@ -24,7 +24,9 @@ use crate::{
         safetensors::{MappedSafetensors, SafetensorsError, TensorSummary},
     },
     quant::{
-        int8::{Int8Error, quantize},
+        int8::{
+            DEFAULT_CHUNK_ELEMENTS, Int8Error, QuantizationStreamError, quantize_replay_chunks,
+        },
         policy::{PolicyAction, TensorDecision},
     },
 };
@@ -415,12 +417,38 @@ fn write_data(
                 let view = source
                     .tensor(&tensor.source_name)
                     .map_err(|source| WriterError::Source { source })?;
-                let values = view.values().collect::<Vec<_>>();
-                let quantized = quantize(&values).map_err(|source| WriterError::Quantization {
-                    tensor_name: tensor.source_name.clone(),
-                    source,
-                })?;
-                let actual = u64::try_from(quantized.values().len()).unwrap_or(u64::MAX);
+                let mut actual = 0_u64;
+                let stream_result = quantize_replay_chunks(
+                    || view.values(),
+                    DEFAULT_CHUNK_ELEMENTS,
+                    |chunk| {
+                        let chunk_bytes = u64::try_from(chunk.len()).map_err(|_| {
+                            WriterError::DataLengthMismatch {
+                                name: tensor.name.clone(),
+                                expected: tensor.byte_len,
+                                actual: u64::MAX,
+                            }
+                        })?;
+                        actual = actual.checked_add(chunk_bytes).ok_or_else(|| {
+                            WriterError::DataLengthMismatch {
+                                name: tensor.name.clone(),
+                                expected: tensor.byte_len,
+                                actual: u64::MAX,
+                            }
+                        })?;
+                        write_i8_values(file, output_path, chunk)
+                    },
+                );
+                let scale = match stream_result {
+                    Ok(scale) => scale,
+                    Err(QuantizationStreamError::Quantization(source)) => {
+                        return Err(WriterError::Quantization {
+                            tensor_name: tensor.source_name.clone(),
+                            source,
+                        });
+                    }
+                    Err(QuantizationStreamError::Callback(error)) => return Err(error),
+                };
                 if actual != tensor.byte_len {
                     return Err(WriterError::DataLengthMismatch {
                         name: tensor.name.clone(),
@@ -428,8 +456,7 @@ fn write_data(
                         actual,
                     });
                 }
-                write_i8_values(file, output_path, quantized.values())?;
-                scales.insert(tensor.source_name.clone(), quantized.scale());
+                scales.insert(tensor.source_name.clone(), scale);
             }
             OutputTensorRole::QuantizationScale => {
                 let scale = scales.remove(&tensor.source_name).ok_or_else(|| {

@@ -38,8 +38,8 @@ modelq quantize input.safetensors \
 
 The command reports per-tensor policy decisions, reconstruction diagnostics,
 and final byte accounting. It reopens and dequantizes the output before
-reporting success. Only the scalar CPU INT8 path is implemented; later
-formats, devices, and bounded chunk processing are not yet available.
+reporting success. The scalar CPU INT8 path uses bounded replay chunks; later
+formats and devices are not yet available.
 
 ## Local checks
 
