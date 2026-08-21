@@ -12,12 +12,13 @@ tensors. It also includes a scalar symmetric INT8 reference quantizer with
 round-trip dequantization, plus streaming reconstruction and compression
 diagnostics. It also has a conservative, auditable policy for deciding which
 tensors enter the INT8 path, plus a checked output layout planner. Later
-quantization formats, checkpoint writing, and most user-facing commands are
-not implemented yet. See [PROJECT.md](PROJECT.md) for the current project
-definition and implementation roadmap. The planned ModelQ-native INT8 output
-convention is documented in
-[ADR 0002](docs/adr/0002-modelq-native-quantized-tensor-convention.md); the
-writer is not implemented yet.
+quantization formats and most user-facing commands are not implemented yet.
+See [PROJECT.md](PROJECT.md) for the current project definition and
+implementation roadmap. The planned ModelQ-native INT8 output convention is
+documented in
+[ADR 0002](docs/adr/0002-modelq-native-quantized-tensor-convention.md), and
+the streaming writer now implements that convention without changing the
+source mapping.
 
 ## Requirements
 

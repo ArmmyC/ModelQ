@@ -445,6 +445,25 @@ impl MappedSafetensors {
         }
     }
 
+    /// Exposes one tensor's validated raw payload without decoding it.
+    ///
+    /// This is useful for writers that must preserve tensors whose dtype is
+    /// valid SafeTensors metadata but is not part of ModelQ's floating-point
+    /// view API. The returned slice borrows the read-only mapping and does not
+    /// allocate or copy the payload.
+    pub fn tensor_bytes(&self, name: &str) -> Result<&[u8], SafetensorsError> {
+        let tensor = self
+            .tensors
+            .iter()
+            .find(|tensor| tensor.summary.name == name)
+            .ok_or_else(|| SafetensorsError::TensorNotFound {
+                path: self.path.clone(),
+                name: name.to_owned(),
+            })?;
+
+        self.tensor_payload(tensor)
+    }
+
     /// Exposes one supported source tensor as a borrowed, mapped view.
     pub fn tensor(&self, name: &str) -> Result<TensorView<'_>, SafetensorsError> {
         let tensor = self
@@ -462,6 +481,13 @@ impl MappedSafetensors {
                 dtype: tensor.summary.dtype.clone(),
             }
         })?;
+        let data = self.tensor_payload(tensor)?;
+
+        TensorView::new(&tensor.summary.name, dtype, &tensor.summary.shape, data)
+            .map_err(|error| invalid_metadata(&self.path, error.to_string()))
+    }
+
+    fn tensor_payload(&self, tensor: &RawTensor) -> Result<&[u8], SafetensorsError> {
         let start = usize::try_from(tensor.start)
             .ok()
             .and_then(|offset| self.data_start.checked_add(offset))
@@ -474,16 +500,13 @@ impl MappedSafetensors {
             .ok_or_else(|| SafetensorsError::InvalidHeaderLength {
                 path: self.path.clone(),
             })?;
-        let data = self.mmap.get(start..end).ok_or_else(|| {
-            SafetensorsError::MetadataIncompleteBuffer {
+        self.mmap
+            .get(start..end)
+            .ok_or_else(|| SafetensorsError::MetadataIncompleteBuffer {
                 path: self.path.clone(),
                 expected: u64::try_from(end).unwrap_or(u64::MAX),
                 actual: u64::try_from(self.mmap.len()).unwrap_or(u64::MAX),
-            }
-        })?;
-
-        TensorView::new(&tensor.summary.name, dtype, &tensor.summary.shape, data)
-            .map_err(|error| invalid_metadata(&self.path, error.to_string()))
+            })
     }
 }
 
