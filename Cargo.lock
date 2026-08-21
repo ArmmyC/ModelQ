@@ -88,9 +88,34 @@ name = "modelq"
 version = "0.1.0"
 dependencies = [
  "clap",
- "half",
- "memmap2",
+ "modelq-core",
+ "modelq-io",
+ "modelq-quant",
  "serde_json",
+]
+
+[[package]]
+name = "modelq-core"
+version = "0.1.0"
+dependencies = [
+ "half",
+]
+
+[[package]]
+name = "modelq-io"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "modelq-core",
+ "modelq-quant",
+ "serde_json",
+]
+
+[[package]]
+name = "modelq-quant"
+version = "0.1.0"
+dependencies = [
+ "modelq-core",
 ]
 
 [[package]]

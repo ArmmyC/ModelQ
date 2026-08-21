@@ -20,7 +20,8 @@ implementation roadmap. The planned ModelQ-native INT8 output convention is
 documented in
 [ADR 0002](docs/adr/0002-modelq-native-quantized-tensor-convention.md), and
 the streaming writer now implements that convention without changing the
-source mapping.
+source mapping. The initial workspace boundary decision is documented in
+[ADR 0004](docs/adr/0004-workspace-boundaries.md).
 
 ## Requirements
 
@@ -46,8 +47,8 @@ formats and devices are not yet available.
 ## Local checks
 
 ```bash
-cargo build
-cargo test
+cargo build --workspace
+cargo test --workspace --all-targets
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

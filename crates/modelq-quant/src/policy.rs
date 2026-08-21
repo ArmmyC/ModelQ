@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::tensor::TensorInfo;
+use modelq_core::tensor::TensorInfo;
 
 /// Default minimum number of elements for a floating tensor to be considered
 /// for quantization.
@@ -234,7 +234,7 @@ mod tests {
         DEFAULT_MINIMUM_ELEMENTS, DecisionReason, PolicyAction, QuantizationPolicy,
         TensorCandidate, TensorKind,
     };
-    use crate::tensor::{DType, TensorInfo};
+    use modelq_core::tensor::{DType, TensorInfo};
 
     #[test]
     fn preserves_non_floating_tensors_with_a_reason() {

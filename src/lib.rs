@@ -1,12 +1,15 @@
-//! Library entry point for ModelQ.
+//! Compatibility facade and library entry point for ModelQ.
 //!
-//! ModelQ is currently a project scaffold. Its public modules reserve the
-//! boundaries described in the project brief; functional APIs will be added in
-//! later, focused tasks.
+//! The reusable implementation now lives in workspace crates. These reexports
+//! preserve the pre-workspace `modelq::tensor`, `modelq::quant`,
+//! `modelq::diagnostics`, and `modelq::io` paths for existing callers while
+//! the root package continues to provide the `modelq` binary.
 
+pub use modelq_core::{error, tensor};
+pub use modelq_io as io;
+pub use modelq_quant as quant;
+pub use modelq_quant::diagnostics;
+
+/// Reserved execution-backend boundary. A separate backend crate remains
+/// deferred until more than one execution implementation exists.
 pub mod backend;
-pub mod diagnostics;
-pub mod error;
-pub mod io;
-pub mod quant;
-pub mod tensor;

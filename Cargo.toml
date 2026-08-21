@@ -5,6 +5,14 @@ edition = "2024"
 rust-version = "1.85"
 publish = false
 
+[workspace]
+members = [
+    "crates/modelq-core",
+    "crates/modelq-quant",
+    "crates/modelq-io",
+]
+resolver = "2"
+
 [dependencies]
 clap = { version = "=4.6.6", default-features = false, features = [
     "std",
@@ -13,6 +21,9 @@ clap = { version = "=4.6.6", default-features = false, features = [
     "error-context",
     "suggestions",
 ] }
-half = "=2.4.1"
-memmap2 = "=0.9.11"
+modelq-core = { path = "crates/modelq-core" }
+modelq-io = { path = "crates/modelq-io" }
+modelq-quant = { path = "crates/modelq-quant" }
+
+[dev-dependencies]
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

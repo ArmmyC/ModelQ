@@ -6,11 +6,11 @@
 
 use std::fmt;
 
-use crate::quant::int4::{
+use crate::int4::{
     Int4Error, QuantizedTensor as Int4QuantizedTensor, SYMMETRIC_MAX as INT4_MAX,
     SYMMETRIC_MIN as INT4_MIN,
 };
-use crate::quant::int8::{
+use crate::int8::{
     Int8Error, QuantizationStreamError, QuantizedTensor, SYMMETRIC_MAX, SYMMETRIC_MIN,
     quantize_replay_chunks_with_scale, scale_for,
 };
@@ -478,8 +478,8 @@ mod tests {
         int8_tensor_diagnostics_replay, reconstruction_metrics, reconstruction_metrics_streaming,
         saturation_count,
     };
-    use crate::quant::int4::quantize as quantize_int4;
-    use crate::quant::int8::{DEFAULT_CHUNK_ELEMENTS, quantize};
+    use crate::int4::quantize as quantize_int4;
+    use crate::int8::{DEFAULT_CHUNK_ELEMENTS, quantize};
 
     #[test]
     fn calculates_hand_checked_reconstruction_metrics() {

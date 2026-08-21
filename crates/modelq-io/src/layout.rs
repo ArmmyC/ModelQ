@@ -6,10 +6,8 @@
 
 use std::{collections::BTreeSet, fmt, ops::Range};
 
-use crate::{
-    io::safetensors::TensorSummary,
-    quant::policy::{PolicyAction, TensorDecision, TensorKind},
-};
+use crate::safetensors::TensorSummary;
+use modelq_quant::policy::{PolicyAction, TensorDecision, TensorKind};
 
 const INT8_DTYPE: &str = "I8";
 const SCALE_DTYPE: &str = "F32";
@@ -385,10 +383,8 @@ fn append_tensor(
 #[cfg(test)]
 mod tests {
     use super::{LayoutError, OutputTensorRole, plan_output_layout};
-    use crate::{
-        io::safetensors::TensorSummary,
-        quant::policy::{PolicyAction, QuantizationPolicy, TensorCandidate, TensorKind},
-    };
+    use crate::safetensors::TensorSummary;
+    use modelq_quant::policy::{PolicyAction, QuantizationPolicy, TensorCandidate, TensorKind};
 
     fn summary(name: &str, dtype: &str, shape: &[usize], byte_len: u64) -> TensorSummary {
         TensorSummary {
@@ -495,12 +491,12 @@ mod tests {
     #[test]
     fn rejects_quantization_of_unsupported_source_dtype() {
         let source = summary("double", "F64", &[4], 32);
-        let decision = crate::quant::policy::TensorDecision {
+        let decision = modelq_quant::policy::TensorDecision {
             name: "double".to_owned(),
             element_count: 4,
             kind: TensorKind::Floating,
             action: PolicyAction::Quantize,
-            reason: crate::quant::policy::DecisionReason::FloatingMeetsMinimum {
+            reason: modelq_quant::policy::DecisionReason::FloatingMeetsMinimum {
                 element_count: 4,
                 minimum_elements: 1,
             },

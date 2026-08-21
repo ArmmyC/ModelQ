@@ -11,7 +11,7 @@ use std::{
 use memmap2::{Mmap, MmapOptions};
 use serde_json::Value;
 
-use crate::tensor::{DType, TensorView};
+use modelq_core::tensor::{DType, TensorView};
 
 const HEADER_LENGTH_BYTES: u64 = 8;
 const MAX_HEADER_SIZE: u64 = 100_000_000;

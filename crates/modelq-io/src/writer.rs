@@ -19,16 +19,12 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    io::{
-        layout::{LayoutError, OutputLayoutPlan, OutputTensorRole, plan_output_layout},
-        safetensors::{MappedSafetensors, SafetensorsError, TensorSummary},
-    },
-    quant::{
-        int8::{
-            DEFAULT_CHUNK_ELEMENTS, Int8Error, QuantizationStreamError, quantize_replay_chunks,
-        },
-        policy::{PolicyAction, TensorDecision},
-    },
+    layout::{LayoutError, OutputLayoutPlan, OutputTensorRole, plan_output_layout},
+    safetensors::{MappedSafetensors, SafetensorsError, TensorSummary},
+};
+use modelq_quant::{
+    int8::{DEFAULT_CHUNK_ELEMENTS, Int8Error, QuantizationStreamError, quantize_replay_chunks},
+    policy::{PolicyAction, TensorDecision},
 };
 
 const HEADER_LENGTH_BYTES: usize = 8;
@@ -491,7 +487,7 @@ fn write_data(
 fn write_payload(
     file: &mut File,
     output_path: &Path,
-    tensor: &crate::io::layout::OutputTensorPlan,
+    tensor: &crate::layout::OutputTensorPlan,
     bytes: &[u8],
 ) -> Result<(), WriterError> {
     let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);

@@ -1,0 +1,12 @@
+[package]
+name = "modelq-io"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+memmap2 = "=0.9.11"
+modelq-core = { path = "../modelq-core" }
+modelq-quant = { path = "../modelq-quant" }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
