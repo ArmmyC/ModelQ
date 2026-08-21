@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+use crate::quant::int4::{
+    Int4Error, QuantizedTensor as Int4QuantizedTensor, SYMMETRIC_MAX as INT4_MAX,
+    SYMMETRIC_MIN as INT4_MIN,
+};
 use crate::quant::int8::{
     Int8Error, QuantizationStreamError, QuantizedTensor, SYMMETRIC_MAX, SYMMETRIC_MIN,
     quantize_replay_chunks_with_scale, scale_for,
@@ -33,6 +37,8 @@ pub enum DiagnosticsError {
     ByteCountOverflow,
     /// The bounded INT8 path rejected a source value or scale.
     Quantization { source: Int8Error },
+    /// The scalar INT4 path rejected a source value, scale, or packed value.
+    Int4Quantization { source: Int4Error },
 }
 
 impl fmt::Display for DiagnosticsError {
@@ -65,6 +71,12 @@ impl fmt::Display for DiagnosticsError {
                     "could not quantize values for diagnostics: {source}"
                 )
             }
+            Self::Int4Quantization { source } => {
+                write!(
+                    formatter,
+                    "could not quantize INT4 values for diagnostics: {source}"
+                )
+            }
         }
     }
 }
@@ -73,6 +85,7 @@ impl std::error::Error for DiagnosticsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Quantization { source } => Some(source),
+            Self::Int4Quantization { source } => Some(source),
             _ => None,
         }
     }
@@ -215,6 +228,14 @@ where
         .count() as u64
 }
 
+/// Counts values that reached either endpoint of the symmetric INT4 range.
+pub fn saturation_count_int4(values: &[i8]) -> u64 {
+    values
+        .iter()
+        .filter(|&&value| value == INT4_MIN || value == INT4_MAX)
+        .count() as u64
+}
+
 /// Accounts for payload and representation overhead bytes with overflow
 /// checking.
 pub fn compression_accounting(
@@ -265,6 +286,41 @@ pub fn int8_tensor_diagnostics(
         max_abs_error: metrics.max_abs_error,
         sqnr_db: metrics.sqnr_db,
         saturated_values: saturation_count(quantized.values()),
+    })
+}
+
+/// Calculates reconstruction and compression diagnostics for a scalar INT4
+/// tensor.
+///
+/// The reference path intentionally materializes unpacked and reconstructed
+/// values so the representation is easy to inspect. The bounded INT4 path can
+/// be added later using the same iterator-oriented metrics helpers as INT8.
+pub fn int4_tensor_diagnostics(
+    source: &[f32],
+    quantized: &Int4QuantizedTensor,
+    source_bytes: u64,
+    scale_bytes: u64,
+) -> Result<TensorDiagnostics, DiagnosticsError> {
+    let reconstructed = quantized
+        .dequantize()
+        .map_err(|source| DiagnosticsError::Int4Quantization { source })?;
+    let unpacked = quantized
+        .unpacked_values()
+        .map_err(|source| DiagnosticsError::Int4Quantization { source })?;
+    let metrics = reconstruction_metrics(source, reconstructed)?;
+    let quantized_payload_bytes = u64::try_from(quantized.packed_values().len())
+        .map_err(|_| DiagnosticsError::ByteCountOverflow)?;
+    let accounting = compression_accounting(source_bytes, quantized_payload_bytes, scale_bytes)?;
+
+    Ok(TensorDiagnostics {
+        elements: metrics.elements,
+        source_bytes,
+        quantized_bytes: accounting.total_quantized_bytes,
+        mse: metrics.mse,
+        mae: metrics.mae,
+        max_abs_error: metrics.max_abs_error,
+        sqnr_db: metrics.sqnr_db,
+        saturated_values: saturation_count_int4(&unpacked),
     })
 }
 
@@ -418,10 +474,11 @@ impl MetricsAccumulator {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticsError, compression_accounting, int8_tensor_diagnostics,
+        DiagnosticsError, compression_accounting, int4_tensor_diagnostics, int8_tensor_diagnostics,
         int8_tensor_diagnostics_replay, reconstruction_metrics, reconstruction_metrics_streaming,
         saturation_count,
     };
+    use crate::quant::int4::quantize as quantize_int4;
     use crate::quant::int8::{DEFAULT_CHUNK_ELEMENTS, quantize};
 
     #[test]
@@ -509,6 +566,23 @@ mod tests {
         assert!(diagnostics.mae > 0.0);
         assert!(diagnostics.max_abs_error > 0.0);
         assert_eq!(diagnostics.compression_ratio(), Some(20.0 / 9.0));
+    }
+
+    #[test]
+    fn calculates_int4_quantize_and_dequant_diagnostics() {
+        let source = [1.0, 2.0, 3.0, 6.0, 0.0];
+        let quantized = quantize_int4(&source, 2).expect("the fixture is finite");
+        let diagnostics = int4_tensor_diagnostics(&source, &quantized, 20, 12)
+            .expect("the quantized tensor has valid groups and scales");
+
+        assert_eq!(diagnostics.elements, 5);
+        assert_eq!(diagnostics.source_bytes, 20);
+        assert_eq!(diagnostics.quantized_bytes, 15);
+        assert_eq!(diagnostics.saturated_values, 2);
+        assert!(diagnostics.mse > 0.0);
+        assert!(diagnostics.mae > 0.0);
+        assert!(diagnostics.max_abs_error > 0.0);
+        assert_eq!(diagnostics.compression_ratio(), Some(20.0 / 15.0));
     }
 
     #[test]
