@@ -35,6 +35,12 @@ validation command are documented in
 [ADR 0008](docs/adr/0008-gguf-q8-0-compatibility-spike.md). Quantization is
 still not exposed as a general GGUF model conversion command.
 
+Task 19 adds reference element codecs for FP4 E2M1, FP8 E4M3, and FP8 E5M2.
+They use documented nearest-even rounding and satfinite behavior with
+exhaustive bit-pattern tests. They do not yet add scaling, FP4 array packing,
+NVFP4, or runtime-specific export; see
+[ADR 0009](docs/adr/0009-fp4-fp8-codecs.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
