@@ -41,6 +41,12 @@ exhaustive bit-pattern tests. They do not yet add scaling, FP4 array packing,
 NVFP4, or runtime-specific export; see
 [ADR 0009](docs/adr/0009-fp4-fp8-codecs.md).
 
+Task 20 records the NVFP4 research boundary: E2M1 elements, hierarchical
+E4M3/F32 scaling, 16-value groups, the 16x16 weight variant, and a future
+Blackwell/runtime validation path. NVFP4 quantization, packing, and runtime
+export are not implemented; see
+[ADR 0010](docs/adr/0010-nvfp4-research-spike.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
