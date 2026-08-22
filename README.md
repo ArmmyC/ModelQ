@@ -43,9 +43,14 @@ NVFP4, or runtime-specific export; see
 
 Task 20 records the NVFP4 research boundary: E2M1 elements, hierarchical
 E4M3/F32 scaling, 16-value groups, the 16x16 weight variant, and a future
-Blackwell/runtime validation path. NVFP4 quantization, packing, and runtime
-export are not implemented; see
+Blackwell/runtime validation path. The ModelQ-native scalar reference is now
+implemented, but runtime-specific export and validation are not; see
 [ADR 0010](docs/adr/0010-nvfp4-research-spike.md).
+
+The native NVFP4 reference increment is now available in
+`modelq_quant::nvfp4`. It is a scalar, weight-only implementation with
+ModelQ-native low-nibble-first packing and round-trip validation; it does not
+claim Transformer Engine or TensorRT compatibility.
 
 ## Requirements
 
