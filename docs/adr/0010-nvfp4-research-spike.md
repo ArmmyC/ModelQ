@@ -140,7 +140,7 @@ reference stream.
 
 ### Data-free weight-only conversion algorithm
 
-The future scalar implementation will process one floating-point weight
+The scalar reference implementation processes one floating-point weight
 tensor at a time without a calibration forward pass:
 
 1. Convert the source F32/F16/BF16 values to the F32 reference domain and
@@ -188,8 +188,8 @@ claimed by this ADR.
 
 ### Test and reference strategy
 
-The implementation work following this spike will retain the scalar FP4/FP8
-codecs as the oracle and add:
+The implementation retains the scalar FP4/FP8 codecs as the oracle and
+covers:
 
 - exhaustive checks of all 16 E2M1 codes and both nibble orders;
 - golden zero, single-block, all-equal, maximum-range, subnormal-scale, and
@@ -251,18 +251,17 @@ reproducible and keeps later recipes measurable.
 
 ## Consequences
 
-This ADR gives future implementation tasks a concrete numerical oracle,
-grouping rule, and conversion sequence while preserving the project's
-compatibility-level honesty.  It adds no Rust code, Cargo dependency, GPU
-requirement, container convention, or runtime claim.  The first NVFP4 coding
-tasks should implement the native scalar representation and tests, followed
-by a separately reviewed exporter for one pinned NVIDIA runtime.
+This ADR gives the implementation a concrete numerical oracle, grouping rule,
+and conversion sequence while preserving the project's compatibility-level
+honesty.  The native scalar representation, packing, dequantization, and
+shape-boundary checks are implemented in `modelq_quant::nvfp4` without adding
+dependencies or GPU requirements.  A native container convention and any
+runtime exporter remain separately reviewed work.
 
 ## Non-goals
 
-This ADR does not implement:
+This ADR does not define:
 
-- NVFP4 quantization, packing, or dequantization code;
 - a SafeTensors/GGUF/native-container metadata convention;
 - Transformer Engine scale swizzles or transposed runtime buffers;
 - TensorRT/TensorRT-LLM/Model Optimizer export;

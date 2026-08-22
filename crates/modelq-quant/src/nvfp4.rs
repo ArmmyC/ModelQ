@@ -27,6 +27,12 @@ const MIN_POSITIVE_F32: f32 = f32::from_bits(1);
 pub enum Nvfp4Error {
     /// A source value is not finite.
     NonFiniteInput { index: usize, value: f32 },
+    /// A shaped tensor is empty or its final dimension is not block-aligned.
+    InvalidShape { shape: Vec<usize> },
+    /// The product of shaped tensor dimensions overflowed `usize`.
+    ShapeElementCountOverflow { shape: Vec<usize> },
+    /// The source length does not match the checked shape product.
+    ShapeLengthMismatch { expected: usize, actual: usize },
     /// A packed E2M1 nibble is outside the four-bit range.
     PackedValueOutOfRange { index: usize, value: u8 },
     /// The packed payload length does not match the element count.
@@ -56,6 +62,20 @@ impl fmt::Display for Nvfp4Error {
                     "NVFP4 input at index {index} is not finite: {value:?}"
                 )
             }
+            Self::InvalidShape { shape } => write!(
+                formatter,
+                "NVFP4 shape {shape:?} must have positive dimensions and a final dimension divisible by {BLOCK_SIZE}"
+            ),
+            Self::ShapeElementCountOverflow { shape } => {
+                write!(
+                    formatter,
+                    "NVFP4 shape {shape:?} overflows its element count"
+                )
+            }
+            Self::ShapeLengthMismatch { expected, actual } => write!(
+                formatter,
+                "NVFP4 shape describes {expected} values but source contains {actual}"
+            ),
             Self::PackedValueOutOfRange { index, value } => write!(
                 formatter,
                 "NVFP4 packed value at index {index} is outside [0, 15]: {value}"
@@ -192,7 +212,9 @@ impl QuantizedTensor {
 /// The returned global scale is a decode scale.  Each source value is
 /// reconstructed as `e2m1 * e4m3_block_scale * global_scale`.  The input is
 /// treated as a flattened row-major stream; shape metadata belongs to a
-/// future container layer.
+/// caller or a future container layer.  Use [`quantize_shaped`] when the
+/// source tensor's final dimension must be checked against the native block
+/// layout.
 pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
     let global_amax = max_abs(values)?;
     let global_scale = if global_amax == 0.0 {
@@ -238,6 +260,40 @@ pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
         global_scale,
         elements: values.len(),
     })
+}
+
+/// Quantizes a shaped row-major tensor after checking the native block rule.
+///
+/// NVFP4 groups consecutive values along the final dimension, so this entry
+/// point requires non-zero dimensions and a final dimension divisible by
+/// [`BLOCK_SIZE`].  The returned representation remains flat; callers retain
+/// the original `shape` for their container or tensor metadata.
+pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTensor, Nvfp4Error> {
+    if shape.is_empty()
+        || shape.contains(&0)
+        || !shape
+            .last()
+            .is_some_and(|&dimension| dimension % BLOCK_SIZE == 0)
+    {
+        return Err(Nvfp4Error::InvalidShape {
+            shape: shape.to_vec(),
+        });
+    }
+
+    let expected = shape
+        .iter()
+        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
+        .ok_or_else(|| Nvfp4Error::ShapeElementCountOverflow {
+            shape: shape.to_vec(),
+        })?;
+    if expected != values.len() {
+        return Err(Nvfp4Error::ShapeLengthMismatch {
+            expected,
+            actual: values.len(),
+        });
+    }
+
+    quantize(values)
 }
 
 /// Packs E2M1 bit patterns two per byte, with the first value in the low
@@ -401,7 +457,7 @@ fn validate_block_scale(bits: u8, block: usize) -> Result<(), Nvfp4Error> {
 mod tests {
     use super::{
         BLOCK_SIZE, FP4_MAX, FP8_MAX, Nvfp4Error, block_count, dequantize, pack, packed_len,
-        quantize, unpack, validate_parts,
+        quantize, quantize_shaped, unpack, validate_parts,
     };
 
     #[test]
@@ -436,6 +492,44 @@ mod tests {
         for (actual, expected) in reconstructed.iter().zip(source) {
             assert!((actual - expected).abs() <= 1e-6, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn validates_shaped_final_dimension_and_preserves_flat_encoding() {
+        let source = [0.0_f32; BLOCK_SIZE * 2];
+        let quantized = quantize_shaped(&source, &[2, BLOCK_SIZE])
+            .expect("two complete final-dimension blocks are valid");
+        assert_eq!(quantized.len(), source.len());
+        assert_eq!(quantized.packed_values(), [0; BLOCK_SIZE]);
+
+        assert!(matches!(
+            quantize_shaped(&source, &[4, BLOCK_SIZE / 2]),
+            Err(Nvfp4Error::InvalidShape { .. })
+        ));
+        assert!(matches!(
+            quantize_shaped(&source, &[]),
+            Err(Nvfp4Error::InvalidShape { .. })
+        ));
+        assert!(matches!(
+            quantize_shaped(&source, &[0, BLOCK_SIZE]),
+            Err(Nvfp4Error::InvalidShape { .. })
+        ));
+    }
+
+    #[test]
+    fn checks_shaped_element_count_without_overflow() {
+        let source = [0.0_f32; BLOCK_SIZE];
+        assert_eq!(
+            quantize_shaped(&source, &[2, BLOCK_SIZE]),
+            Err(Nvfp4Error::ShapeLengthMismatch {
+                expected: BLOCK_SIZE * 2,
+                actual: BLOCK_SIZE,
+            })
+        );
+        assert!(matches!(
+            quantize_shaped(&source, &[usize::MAX, BLOCK_SIZE]),
+            Err(Nvfp4Error::ShapeElementCountOverflow { .. })
+        ));
     }
 
     #[test]

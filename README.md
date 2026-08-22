@@ -49,8 +49,9 @@ implemented, but runtime-specific export and validation are not; see
 
 The native NVFP4 reference increment is now available in
 `modelq_quant::nvfp4`. It is a scalar, weight-only implementation with
-ModelQ-native low-nibble-first packing and round-trip validation; it does not
-claim Transformer Engine or TensorRT compatibility.
+ModelQ-native low-nibble-first packing, round-trip validation, and a
+shape-aware entry point that checks the final dimension is divisible by 16;
+it does not claim Transformer Engine or TensorRT compatibility.
 
 ## Requirements
 
