@@ -123,6 +123,7 @@ dependencies = [
 name = "modelq-quant"
 version = "0.1.0"
 dependencies = [
+ "half",
  "modelq-core",
 ]
 

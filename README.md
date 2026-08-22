@@ -26,6 +26,15 @@ source mapping. The initial workspace boundary decision is documented in
 [ADR 0004](docs/adr/0004-workspace-boundaries.md), and the CPU parallel
 boundary is documented in [ADR 0007](docs/adr/0007-cpu-parallel-dispatch.md).
 
+Task 18 adds a deliberately narrow GGUF compatibility spike: one GGUF v3
+Q8_0 tensor, with a deterministic fixture generator and a Rust inspector. It
+is currently compatibility Level 2 (container-valid) only; it is not a
+general GGUF reader and does not claim that the fixture is a runnable model.
+The exact layout, pinned llama.cpp reference, and external `llama-gguf`
+validation command are documented in
+[ADR 0008](docs/adr/0008-gguf-q8-0-compatibility-spike.md). Quantization is
+still not exposed as a general GGUF model conversion command.
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
@@ -55,4 +64,10 @@ cargo test --workspace --all-targets
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo bench --bench cpu_parallel
+```
+
+To generate the focused GGUF fixture locally:
+
+```bash
+cargo run -p modelq-io --example gguf_q8_0_fixture -- /tmp/modelq-q8-0.gguf
 ```

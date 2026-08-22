@@ -6,4 +6,5 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
+half = "=2.4.1"
 modelq-core = { path = "../modelq-core" }
