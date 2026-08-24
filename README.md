@@ -53,6 +53,10 @@ ModelQ-native low-nibble-first packing, round-trip validation, and a
 shape-aware entry point that checks the final dimension is divisible by 16;
 it does not claim Transformer Engine or TensorRT compatibility.
 
+The future ModelQ-native NVFP4 SafeTensors convention is specified in
+[ADR 0011](docs/adr/0011-nvfp4-native-safetensors-convention.md). An NVFP4
+SafeTensors writer and CLI path are not implemented yet.
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

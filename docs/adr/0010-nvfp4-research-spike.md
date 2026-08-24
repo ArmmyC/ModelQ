@@ -164,10 +164,11 @@ recipes, not hidden behavior of the baseline.
 
 ### ModelQ-native versus runtime-compatible output
 
-The baseline is **Level 1 — representation-valid** only.  A future native
-container may describe `qdata`, `block_scale`, `global_scale`, group size,
-axis, packing order, and an explicit convention version.  It must also retain
-the source shape and say that its row-major 1D grouping is ModelQ-native.
+The baseline is **Level 1 — representation-valid** only.  [ADR
+0011](0011-nvfp4-native-safetensors-convention.md) specifies the future native
+SafeTensors convention for `qdata`, `block_scale`, `global_scale`, group size,
+axis, packing order, source shape, and an explicit convention version.  That
+convention still identifies the row-major 1D grouping as ModelQ-native.
 
 It is not automatically usable by Transformer Engine or TensorRT:
 
@@ -255,14 +256,14 @@ This ADR gives the implementation a concrete numerical oracle, grouping rule,
 and conversion sequence while preserving the project's compatibility-level
 honesty.  The native scalar representation, packing, dequantization, and
 shape-boundary checks are implemented in `modelq_quant::nvfp4` without adding
-dependencies or GPU requirements.  A native container convention and any
-runtime exporter remain separately reviewed work.
+dependencies or GPU requirements.  The native SafeTensors convention is
+specified in [ADR 0011](0011-nvfp4-native-safetensors-convention.md); a writer
+and any runtime exporter remain separately reviewed work.
 
 ## Non-goals
 
 This ADR does not define:
 
-- a SafeTensors/GGUF/native-container metadata convention;
 - Transformer Engine scale swizzles or transposed runtime buffers;
 - TensorRT/TensorRT-LLM/Model Optimizer export;
 - activation quantization, calibration, RHT, stochastic rounding, 4over6,
