@@ -131,7 +131,7 @@ fn plans_selected_tensor_and_preserves_the_rest() {
 
     assert_eq!(plan.tensors[3].role, Nvfp4OutputRole::GlobalScale);
     assert_eq!(plan.tensors[3].dtype, "F32");
-    assert_eq!(plan.tensors[3].shape, []);
+    assert!(plan.tensors[3].shape.is_empty());
     assert_eq!(plan.tensors[3].byte_len, 4);
     assert_eq!(plan.tensors[3].data_offsets, 82..86);
     assert_eq!(plan.total_data_bytes, 86);
@@ -164,7 +164,7 @@ fn writes_and_reopens_native_nvfp4_output() {
     );
     assert_eq!(inspection.tensors[1].shape, [1, 8]);
     assert_eq!(inspection.tensors[2].shape, [1, 1]);
-    assert_eq!(inspection.tensors[3].shape, []);
+    assert!(inspection.tensors[3].shape.is_empty());
 
     let header = read_header(&destination_path.0);
     let metadata = header
