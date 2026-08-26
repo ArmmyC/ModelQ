@@ -55,7 +55,9 @@ it does not claim Transformer Engine or TensorRT compatibility.
 
 The future ModelQ-native NVFP4 SafeTensors convention is specified in
 [ADR 0011](docs/adr/0011-nvfp4-native-safetensors-convention.md). An NVFP4
-SafeTensors writer and CLI path are not implemented yet.
+SafeTensors planner and writer are now available as a library-only path. They
+emit the ADR 0011 native container and remain runtime-independent: no NVFP4
+CLI flag, runtime exporter, GPU path, or hardware validation is included yet.
 
 ## Requirements
 
