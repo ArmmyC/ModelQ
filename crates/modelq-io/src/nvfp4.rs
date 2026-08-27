@@ -238,7 +238,10 @@ impl fmt::Display for Nvfp4ReaderError {
         match self {
             Self::Source { source } => write!(formatter, "could not read NVFP4 source: {source}"),
             Self::MissingMetadata { key } => {
-                write!(formatter, "NVFP4 file metadata is missing required key {key:?}")
+                write!(
+                    formatter,
+                    "NVFP4 file metadata is missing required key {key:?}"
+                )
             }
             Self::MetadataMismatch {
                 key,
@@ -255,10 +258,16 @@ impl fmt::Display for Nvfp4ReaderError {
                 write!(formatter, "invalid NVFP4 manifest: {message}")
             }
             Self::MissingTensor { name } => {
-                write!(formatter, "NVFP4 manifest references missing tensor {name:?}")
+                write!(
+                    formatter,
+                    "NVFP4 manifest references missing tensor {name:?}"
+                )
             }
             Self::UnexpectedTensor { name } => {
-                write!(formatter, "SafeTensors tensor {name:?} is not described by NVFP4 manifest")
+                write!(
+                    formatter,
+                    "SafeTensors tensor {name:?} is not described by NVFP4 manifest"
+                )
             }
             Self::TensorMismatch {
                 name,
@@ -276,7 +285,10 @@ impl fmt::Display for Nvfp4ReaderError {
             Self::Quantization {
                 tensor_name,
                 source,
-            } => write!(formatter, "could not decode NVFP4 tensor {tensor_name:?}: {source}"),
+            } => write!(
+                formatter,
+                "could not decode NVFP4 tensor {tensor_name:?}: {source}"
+            ),
         }
     }
 }
@@ -705,7 +717,10 @@ pub fn read_nvfp4_safetensors(
         ("modelq.element_format", MODELQ_ELEMENT_FORMAT),
         ("modelq.block_scale_format", MODELQ_BLOCK_SCALE_FORMAT),
         ("modelq.global_scale_dtype", MODELQ_GLOBAL_SCALE_DTYPE),
-        ("modelq.global_scale_semantics", MODELQ_GLOBAL_SCALE_SEMANTICS),
+        (
+            "modelq.global_scale_semantics",
+            MODELQ_GLOBAL_SCALE_SEMANTICS,
+        ),
         ("modelq.block_size", MODELQ_BLOCK_SIZE),
         ("modelq.packing", MODELQ_PACKING),
         ("modelq.rounding", MODELQ_ROUNDING),
@@ -713,15 +728,14 @@ pub fn read_nvfp4_safetensors(
         require_file_metadata(metadata, key, expected)?;
     }
 
-    let manifest_text = metadata
-        .get("modelq.manifest")
-        .ok_or_else(|| Nvfp4ReaderError::MissingMetadata {
-            key: "modelq.manifest".to_owned(),
-        })?;
-    let manifest: Value =
-        serde_json::from_str(manifest_text).map_err(|source| Nvfp4ReaderError::ManifestJson {
-            source,
-        })?;
+    let manifest_text =
+        metadata
+            .get("modelq.manifest")
+            .ok_or_else(|| Nvfp4ReaderError::MissingMetadata {
+                key: "modelq.manifest".to_owned(),
+            })?;
+    let manifest: Value = serde_json::from_str(manifest_text)
+        .map_err(|source| Nvfp4ReaderError::ManifestJson { source })?;
     let manifest_object = manifest
         .as_object()
         .ok_or_else(|| invalid_manifest("the manifest root must be a JSON object"))?;
@@ -885,8 +899,9 @@ fn read_quantized_record(
         "qdata_shape",
         source_name,
     )?;
-    let qdata_byte_len = u64::try_from(element_count / nvfp4::VALUES_PER_BYTE)
-        .map_err(|_| invalid_manifest(format!("qdata byte length overflows for {source_name:?}")))?;
+    let qdata_byte_len = u64::try_from(element_count / nvfp4::VALUES_PER_BYTE).map_err(|_| {
+        invalid_manifest(format!("qdata byte length overflows for {source_name:?}"))
+    })?;
     let qdata_summary = require_companion_summary(
         summaries_by_name,
         &qdata_name,
@@ -895,16 +910,14 @@ fn read_quantized_record(
         qdata_byte_len,
     )?;
 
-    let block_scale_name =
-        required_manifest_string(record, "block_scale_name", source_name)?;
+    let block_scale_name = required_manifest_string(record, "block_scale_name", source_name)?;
     let expected_block_scale_name = format!("{source_name}.block_scale");
     if block_scale_name != expected_block_scale_name {
         return Err(invalid_manifest(format!(
             "quantized record {source_name:?} names block scales {block_scale_name:?}, expected {expected_block_scale_name:?}"
         )));
     }
-    let block_scale_dtype =
-        required_manifest_string(record, "block_scale_dtype", source_name)?;
+    let block_scale_dtype = required_manifest_string(record, "block_scale_dtype", source_name)?;
     require_manifest_string_value(
         &block_scale_dtype,
         U8_DTYPE,
@@ -920,8 +933,11 @@ fn read_quantized_record(
         "block_scale_shape",
         source_name,
     )?;
-    let block_scale_byte_len = u64::try_from(element_count / nvfp4::BLOCK_SIZE)
-        .map_err(|_| invalid_manifest(format!("block-scale byte length overflows for {source_name:?}")))?;
+    let block_scale_byte_len = u64::try_from(element_count / nvfp4::BLOCK_SIZE).map_err(|_| {
+        invalid_manifest(format!(
+            "block-scale byte length overflows for {source_name:?}"
+        ))
+    })?;
     let block_scale_summary = require_companion_summary(
         summaries_by_name,
         &block_scale_name,
@@ -930,24 +946,21 @@ fn read_quantized_record(
         block_scale_byte_len,
     )?;
 
-    let global_scale_name =
-        required_manifest_string(record, "global_scale_name", source_name)?;
+    let global_scale_name = required_manifest_string(record, "global_scale_name", source_name)?;
     let expected_global_scale_name = format!("{source_name}.global_scale");
     if global_scale_name != expected_global_scale_name {
         return Err(invalid_manifest(format!(
             "quantized record {source_name:?} names global scale {global_scale_name:?}, expected {expected_global_scale_name:?}"
         )));
     }
-    let global_scale_dtype =
-        required_manifest_string(record, "global_scale_dtype", source_name)?;
+    let global_scale_dtype = required_manifest_string(record, "global_scale_dtype", source_name)?;
     require_manifest_string_value(
         &global_scale_dtype,
         F32_DTYPE,
         "global_scale_dtype",
         source_name,
     )?;
-    let global_scale_shape =
-        required_manifest_shape(record, "global_scale_shape", source_name)?;
+    let global_scale_shape = required_manifest_shape(record, "global_scale_shape", source_name)?;
     let expected_global_scale_shape: &[usize] = &[];
     require_manifest_shape_value(
         &global_scale_shape,
@@ -1030,12 +1043,13 @@ fn require_companion_summary<'a>(
     shape: &[usize],
     byte_len: u64,
 ) -> Result<&'a TensorSummary, Nvfp4ReaderError> {
-    let summary = summaries_by_name
-        .get(name)
-        .copied()
-        .ok_or_else(|| Nvfp4ReaderError::MissingTensor {
-            name: name.to_owned(),
-        })?;
+    let summary =
+        summaries_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| Nvfp4ReaderError::MissingTensor {
+                name: name.to_owned(),
+            })?;
     validate_summary_descriptor(summary, name, dtype, shape)?;
     if summary.byte_len != byte_len {
         return Err(Nvfp4ReaderError::TensorMismatch {
@@ -1094,11 +1108,7 @@ fn required_manifest_string(
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| {
-            invalid_manifest(format!(
-                "{context:?} field {key:?} must be a string"
-            ))
-        })
+        .ok_or_else(|| invalid_manifest(format!("{context:?} field {key:?} must be a string")))
 }
 
 fn required_manifest_shape(
@@ -1109,9 +1119,7 @@ fn required_manifest_shape(
     let values = object
         .get(key)
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            invalid_manifest(format!("{context:?} field {key:?} must be an array"))
-        })?;
+        .ok_or_else(|| invalid_manifest(format!("{context:?} field {key:?} must be an array")))?;
     values
         .iter()
         .enumerate()
@@ -1186,10 +1194,7 @@ fn require_manifest_shape_value(
     Ok(())
 }
 
-fn manifest_element_count(
-    name: &str,
-    shape: &[usize],
-) -> Result<usize, Nvfp4ReaderError> {
+fn manifest_element_count(name: &str, shape: &[usize]) -> Result<usize, Nvfp4ReaderError> {
     if shape.is_empty()
         || shape.contains(&0)
         || !shape

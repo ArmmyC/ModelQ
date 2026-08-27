@@ -6,10 +6,7 @@ use std::{
 };
 
 use modelq::io::{
-    nvfp4::{
-        Nvfp4ReaderError, plan_nvfp4_output, read_nvfp4_safetensors,
-        write_nvfp4_safetensors,
-    },
+    nvfp4::{Nvfp4ReaderError, plan_nvfp4_output, read_nvfp4_safetensors, write_nvfp4_safetensors},
     safetensors::MappedSafetensors,
 };
 use modelq::quant::nvfp4 as reference_nvfp4;
@@ -74,8 +71,8 @@ fn rewrite_header(path: &Path, mutate: impl FnOnce(&mut Value)) {
         bytes[..8].try_into().expect("header has a length prefix"),
     ))
     .expect("header length fits usize");
-    let mut header: Value = serde_json::from_slice(&bytes[8..8 + old_header_len])
-        .expect("output header is JSON");
+    let mut header: Value =
+        serde_json::from_slice(&bytes[8..8 + old_header_len]).expect("output header is JSON");
     mutate(&mut header);
     let mut new_header = serde_json::to_vec(&header).expect("mutated header serializes");
     let new_header_len = new_header.len().div_ceil(8) * 8;
@@ -116,11 +113,8 @@ fn reads_native_nvfp4_output_and_reconstructs_values() {
     let source_path = source_fixture("round-trip-source", &values);
     let destination_path = unique_path("round-trip-output");
     let source = MappedSafetensors::open(&source_path.0).expect("source fixture opens");
-    let plan = plan_nvfp4_output(
-        &source.inspection().tensors,
-        &["weight".to_owned()],
-    )
-    .expect("fixture shape is valid for NVFP4");
+    let plan = plan_nvfp4_output(&source.inspection().tensors, &["weight".to_owned()])
+        .expect("fixture shape is valid for NVFP4");
     write_nvfp4_safetensors(&source, &plan, &destination_path.0)
         .expect("native NVFP4 output writes");
 
@@ -175,9 +169,8 @@ fn rejects_unknown_manifest_schema() {
             .expect("manifest is a string");
         let mut manifest: Value = serde_json::from_str(manifest_text).expect("manifest is JSON");
         manifest["schema"] = Value::String("modelq.nvfp4.manifest.v999".to_owned());
-        header["__metadata__"]["modelq.manifest"] = Value::String(
-            serde_json::to_string(&manifest).expect("mutated manifest serializes"),
-        );
+        header["__metadata__"]["modelq.manifest"] =
+            Value::String(serde_json::to_string(&manifest).expect("mutated manifest serializes"));
     });
     let output = MappedSafetensors::open(&destination_path.0).expect("container remains valid");
 
@@ -194,9 +187,8 @@ fn rejects_manifest_physical_shape_mismatch() {
             .expect("manifest is a string");
         let mut manifest: Value = serde_json::from_str(manifest_text).expect("manifest is JSON");
         manifest["tensors"]["weight"]["qdata_shape"] = json!([1, 4]);
-        header["__metadata__"]["modelq.manifest"] = Value::String(
-            serde_json::to_string(&manifest).expect("mutated manifest serializes"),
-        );
+        header["__metadata__"]["modelq.manifest"] =
+            Value::String(serde_json::to_string(&manifest).expect("mutated manifest serializes"));
     });
     let output = MappedSafetensors::open(&destination_path.0).expect("container remains valid");
 
@@ -228,9 +220,8 @@ fn rejects_manifest_references_to_missing_preserved_tensor() {
             .expect("manifest is a string");
         let mut manifest: Value = serde_json::from_str(manifest_text).expect("manifest is JSON");
         manifest["tensors"]["ids"]["tensor_name"] = Value::String("missing".to_owned());
-        header["__metadata__"]["modelq.manifest"] = Value::String(
-            serde_json::to_string(&manifest).expect("mutated manifest serializes"),
-        );
+        header["__metadata__"]["modelq.manifest"] =
+            Value::String(serde_json::to_string(&manifest).expect("mutated manifest serializes"));
     });
     let output = MappedSafetensors::open(&destination_path.0).expect("container remains valid");
 
