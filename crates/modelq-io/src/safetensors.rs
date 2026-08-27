@@ -1,6 +1,7 @@
 //! SafeTensors metadata inspection and read-only memory-mapped access.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     fs::File,
     io::{self, Read},
@@ -187,11 +188,15 @@ pub fn inspect_file(path: &Path) -> Result<Inspection, SafetensorsError> {
             source,
         })?;
 
-    let tensors = parse_tensors(path, file_size, header_size, &header)?;
+    let parsed = parse_tensors(path, file_size, header_size, &header)?;
 
     Ok(Inspection {
         file_size,
-        tensors: tensors.into_iter().map(|tensor| tensor.summary).collect(),
+        tensors: parsed
+            .tensors
+            .into_iter()
+            .map(|tensor| tensor.summary)
+            .collect(),
     })
 }
 
@@ -214,7 +219,7 @@ fn parse_tensors(
     file_size: u64,
     header_size: u64,
     header: &[u8],
-) -> Result<Vec<RawTensor>, SafetensorsError> {
+) -> Result<ParsedSafetensors, SafetensorsError> {
     let header = str::from_utf8(header).map_err(|source| SafetensorsError::InvalidHeaderUtf8 {
         path: path.to_owned(),
         source,
@@ -241,10 +246,11 @@ fn parse_tensors(
     }
     let data_len = file_size - data_start;
 
+    let mut metadata = BTreeMap::new();
     let mut tensors = Vec::new();
     for (name, value) in object {
         if name == "__metadata__" {
-            validate_file_metadata(path, value)?;
+            metadata = parse_file_metadata(path, value)?;
             continue;
         }
 
@@ -329,7 +335,13 @@ fn parse_tensors(
         });
     }
 
-    Ok(tensors)
+    Ok(ParsedSafetensors { tensors, metadata })
+}
+
+#[derive(Debug)]
+struct ParsedSafetensors {
+    tensors: Vec<RawTensor>,
+    metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -350,6 +362,7 @@ pub struct MappedSafetensors {
     file_size: u64,
     data_start: usize,
     tensors: Vec<RawTensor>,
+    metadata: BTreeMap<String, String>,
     /// Keeping the read-only source handle in the owner documents and enforces
     /// the mapping lifetime relationship required by the mmap API.
     _file: File,
@@ -406,13 +419,14 @@ impl MappedSafetensors {
         let data_start = usize::try_from(data_start_u64)
             .map_err(|_| SafetensorsError::InvalidHeaderLength { path: path.clone() })?;
         let header = &mmap[HEADER_LENGTH_BYTES as usize..data_start];
-        let tensors = parse_tensors(&path, file_size, header_size, header)?;
+        let parsed = parse_tensors(&path, file_size, header_size, header)?;
 
         Ok(Self {
             path,
             file_size,
             data_start,
-            tensors,
+            tensors: parsed.tensors,
+            metadata: parsed.metadata,
             _file: file,
             mmap,
         })
@@ -426,6 +440,14 @@ impl MappedSafetensors {
     /// Returns the source path used to open this reader.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the validated string-valued `__metadata__` entries.
+    ///
+    /// The map is parsed once while opening the file and is borrowed from the
+    /// reader without re-reading or copying the SafeTensors header.
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
     }
 
     /// Returns the validated tensor metadata in data-offset order.
@@ -526,17 +548,22 @@ fn invalid_metadata(path: &Path, message: impl Into<String>) -> SafetensorsError
     }
 }
 
-fn validate_file_metadata(path: &Path, value: &Value) -> Result<(), SafetensorsError> {
+fn parse_file_metadata(
+    path: &Path,
+    value: &Value,
+) -> Result<BTreeMap<String, String>, SafetensorsError> {
     let object = value
         .as_object()
         .ok_or_else(|| invalid_metadata(path, "__metadata__ must be a JSON object"))?;
-    if object.values().any(|value| value.as_str().is_none()) {
-        return Err(invalid_metadata(
-            path,
-            "__metadata__ values must be strings",
-        ));
-    }
-    Ok(())
+    object
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (key.clone(), value.to_owned()))
+                .ok_or_else(|| invalid_metadata(path, "__metadata__ values must be strings"))
+        })
+        .collect()
 }
 
 fn parse_shape(path: &Path, name: &str, value: &Value) -> Result<Vec<usize>, SafetensorsError> {
@@ -735,6 +762,10 @@ mod tests {
         let reader = MappedSafetensors::open(&file.0).expect("fixture maps successfully");
 
         assert_eq!(reader.file_size(), fs::metadata(&file.0).unwrap().len());
+        assert_eq!(
+            reader.metadata().get("format").map(String::as_str),
+            Some("test")
+        );
         assert_eq!(reader.tensors().len(), 3);
         assert_eq!(
             reader

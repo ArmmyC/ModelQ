@@ -15,7 +15,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSummary};
 use modelq_quant::nvfp4::{self, Nvfp4Error};
@@ -96,6 +96,19 @@ impl Nvfp4OutputPlan {
     pub fn quantized_source_names(&self) -> &[String] {
         &self.quantized_names
     }
+}
+
+/// One original tensor reconstructed from a native NVFP4 companion trio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nvfp4DecodedTensor {
+    /// Original source tensor name from the manifest.
+    pub name: String,
+    /// Original source SafeTensors dtype recorded by the writer.
+    pub original_dtype: String,
+    /// Original source tensor shape recorded by the writer.
+    pub original_shape: Vec<usize>,
+    /// Reconstructed values in the scalar F32 reference domain.
+    pub values: Vec<f32>,
 }
 
 /// Errors returned when source metadata and an NVFP4 selection cannot form a
@@ -181,6 +194,103 @@ impl fmt::Display for Nvfp4LayoutError {
 }
 
 impl std::error::Error for Nvfp4LayoutError {}
+
+/// Errors returned while validating and decoding a native NVFP4 SafeTensors
+/// file.
+#[derive(Debug)]
+pub enum Nvfp4ReaderError {
+    /// A mapped source read failed.
+    Source { source: SafetensorsError },
+    /// A required file-level metadata entry is absent.
+    MissingMetadata { key: String },
+    /// A file-level metadata entry has an unexpected value.
+    MetadataMismatch {
+        key: String,
+        expected: String,
+        actual: String,
+    },
+    /// The manifest string was not valid JSON.
+    ManifestJson { source: serde_json::Error },
+    /// The manifest did not follow the native NVFP4 schema.
+    InvalidManifest { message: String },
+    /// A manifest-referenced tensor is absent from the SafeTensors file.
+    MissingTensor { name: String },
+    /// The SafeTensors file contains a tensor not described by the manifest.
+    UnexpectedTensor { name: String },
+    /// A companion descriptor disagrees with the manifest-derived layout.
+    TensorMismatch {
+        name: String,
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    /// The manifest claims an unsupported original source dtype.
+    UnsupportedOriginalDtype { name: String, dtype: String },
+    /// The scalar NVFP4 representation failed validation or reconstruction.
+    Quantization {
+        tensor_name: String,
+        source: Nvfp4Error,
+    },
+}
+
+impl fmt::Display for Nvfp4ReaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source { source } => write!(formatter, "could not read NVFP4 source: {source}"),
+            Self::MissingMetadata { key } => {
+                write!(formatter, "NVFP4 file metadata is missing required key {key:?}")
+            }
+            Self::MetadataMismatch {
+                key,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "NVFP4 file metadata {key:?} is {actual:?}, expected {expected:?}"
+            ),
+            Self::ManifestJson { source } => {
+                write!(formatter, "NVFP4 manifest is not valid JSON: {source}")
+            }
+            Self::InvalidManifest { message } => {
+                write!(formatter, "invalid NVFP4 manifest: {message}")
+            }
+            Self::MissingTensor { name } => {
+                write!(formatter, "NVFP4 manifest references missing tensor {name:?}")
+            }
+            Self::UnexpectedTensor { name } => {
+                write!(formatter, "SafeTensors tensor {name:?} is not described by NVFP4 manifest")
+            }
+            Self::TensorMismatch {
+                name,
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "NVFP4 tensor {name:?} field {field:?} is {actual:?}, expected {expected:?}"
+            ),
+            Self::UnsupportedOriginalDtype { name, dtype } => write!(
+                formatter,
+                "NVFP4 tensor {name:?} has unsupported original dtype {dtype:?}"
+            ),
+            Self::Quantization {
+                tensor_name,
+                source,
+            } => write!(formatter, "could not decode NVFP4 tensor {tensor_name:?}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for Nvfp4ReaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source { source } => Some(source),
+            Self::ManifestJson { source } => Some(source),
+            Self::Quantization { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Plans all native NVFP4 output tensors and contiguous data offsets.
 ///
@@ -573,6 +683,537 @@ mod tests {
             error,
             Nvfp4LayoutError::OutputByteLengthOverflow { .. }
         ));
+    }
+}
+
+/// Reads and decodes a ModelQ-native NVFP4 SafeTensors file.
+///
+/// Every tensor described by the manifest is validated.  Quantized records
+/// are returned as reconstructed F32 values; preserved records are validated
+/// and remain available byte-for-byte through [`MappedSafetensors`].
+pub fn read_nvfp4_safetensors(
+    source: &MappedSafetensors,
+) -> Result<Vec<Nvfp4DecodedTensor>, Nvfp4ReaderError> {
+    let metadata = source.metadata();
+    for &(key, expected) in &[
+        ("modelq.format", MODELQ_FORMAT),
+        ("modelq.format_version", MODELQ_FORMAT_VERSION),
+        ("modelq.compatibility_level", MODELQ_COMPATIBILITY_LEVEL),
+        ("modelq.quantization", MODELQ_QUANTIZATION),
+        ("modelq.scheme", MODELQ_SCHEME),
+        ("modelq.algorithm", MODELQ_ALGORITHM),
+        ("modelq.element_format", MODELQ_ELEMENT_FORMAT),
+        ("modelq.block_scale_format", MODELQ_BLOCK_SCALE_FORMAT),
+        ("modelq.global_scale_dtype", MODELQ_GLOBAL_SCALE_DTYPE),
+        ("modelq.global_scale_semantics", MODELQ_GLOBAL_SCALE_SEMANTICS),
+        ("modelq.block_size", MODELQ_BLOCK_SIZE),
+        ("modelq.packing", MODELQ_PACKING),
+        ("modelq.rounding", MODELQ_ROUNDING),
+    ] {
+        require_file_metadata(metadata, key, expected)?;
+    }
+
+    let manifest_text = metadata
+        .get("modelq.manifest")
+        .ok_or_else(|| Nvfp4ReaderError::MissingMetadata {
+            key: "modelq.manifest".to_owned(),
+        })?;
+    let manifest: Value =
+        serde_json::from_str(manifest_text).map_err(|source| Nvfp4ReaderError::ManifestJson {
+            source,
+        })?;
+    let manifest_object = manifest
+        .as_object()
+        .ok_or_else(|| invalid_manifest("the manifest root must be a JSON object"))?;
+    let schema = required_manifest_string(manifest_object, "schema", "manifest")?;
+    if schema != MANIFEST_SCHEMA {
+        return Err(invalid_manifest(format!(
+            "schema {schema:?} is not {MANIFEST_SCHEMA:?}"
+        )));
+    }
+    let records = manifest_object
+        .get("tensors")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_manifest("manifest field \"tensors\" must be an object"))?;
+
+    let summaries = source.inspection().tensors;
+    let summaries_by_name = summaries
+        .iter()
+        .map(|summary| (summary.name.clone(), summary))
+        .collect::<BTreeMap<_, _>>();
+    let mut expected_output_names = BTreeSet::new();
+    let mut decoded = Vec::new();
+
+    for (source_name, value) in records {
+        let record = value.as_object().ok_or_else(|| {
+            invalid_manifest(format!("tensor {source_name:?} record must be an object"))
+        })?;
+        let action = required_manifest_string(record, "action", source_name)?;
+        match action.as_str() {
+            "preserved" => {
+                read_preserved_record(
+                    source,
+                    &summaries_by_name,
+                    &mut expected_output_names,
+                    source_name,
+                    record,
+                )?;
+            }
+            "quantized" => {
+                let tensor = read_quantized_record(
+                    source,
+                    &summaries_by_name,
+                    &mut expected_output_names,
+                    source_name,
+                    record,
+                )?;
+                decoded.push(tensor);
+            }
+            other => {
+                return Err(invalid_manifest(format!(
+                    "tensor {source_name:?} has unknown action {other:?}"
+                )));
+            }
+        }
+    }
+
+    for summary in &summaries {
+        if !expected_output_names.contains(&summary.name) {
+            return Err(Nvfp4ReaderError::UnexpectedTensor {
+                name: summary.name.clone(),
+            });
+        }
+    }
+
+    decoded.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(decoded)
+}
+
+fn require_file_metadata(
+    metadata: &BTreeMap<String, String>,
+    key: &str,
+    expected: &str,
+) -> Result<(), Nvfp4ReaderError> {
+    let actual = metadata
+        .get(key)
+        .ok_or_else(|| Nvfp4ReaderError::MissingMetadata {
+            key: key.to_owned(),
+        })?;
+    if actual != expected {
+        return Err(Nvfp4ReaderError::MetadataMismatch {
+            key: key.to_owned(),
+            expected: expected.to_owned(),
+            actual: actual.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn read_preserved_record(
+    source: &MappedSafetensors,
+    summaries_by_name: &BTreeMap<String, &TensorSummary>,
+    expected_output_names: &mut BTreeSet<String>,
+    source_name: &str,
+    record: &Map<String, Value>,
+) -> Result<(), Nvfp4ReaderError> {
+    let tensor_name = required_manifest_string(record, "tensor_name", source_name)?;
+    if tensor_name != source_name {
+        return Err(invalid_manifest(format!(
+            "preserved record {source_name:?} names tensor {tensor_name:?}"
+        )));
+    }
+    let dtype = required_manifest_string(record, "original_dtype", source_name)?;
+    let shape = required_manifest_shape(record, "original_shape", source_name)?;
+    let summary = summaries_by_name
+        .get(tensor_name.as_str())
+        .copied()
+        .ok_or_else(|| Nvfp4ReaderError::MissingTensor {
+            name: tensor_name.clone(),
+        })?;
+    validate_summary_descriptor(summary, &tensor_name, &dtype, &shape)?;
+    source
+        .tensor_bytes(&tensor_name)
+        .map_err(|source| Nvfp4ReaderError::Source { source })?;
+    insert_expected_output_name(expected_output_names, tensor_name)
+}
+
+fn read_quantized_record(
+    source: &MappedSafetensors,
+    summaries_by_name: &BTreeMap<String, &TensorSummary>,
+    expected_output_names: &mut BTreeSet<String>,
+    source_name: &str,
+    record: &Map<String, Value>,
+) -> Result<Nvfp4DecodedTensor, Nvfp4ReaderError> {
+    let original_dtype = required_manifest_string(record, "original_dtype", source_name)?;
+    if !is_supported_source_dtype(&original_dtype) {
+        return Err(Nvfp4ReaderError::UnsupportedOriginalDtype {
+            name: source_name.to_owned(),
+            dtype: original_dtype,
+        });
+    }
+    let original_shape = required_manifest_shape(record, "original_shape", source_name)?;
+    let element_count = manifest_element_count(source_name, &original_shape)?;
+
+    let axis = required_manifest_i64(record, "axis", source_name)?;
+    if axis != -1 {
+        return Err(invalid_manifest(format!(
+            "quantized record {source_name:?} axis is {axis}, expected -1"
+        )));
+    }
+    let block_size = required_manifest_u64(record, "block_size", source_name)?;
+    if block_size != u64::try_from(nvfp4::BLOCK_SIZE).unwrap_or(u64::MAX) {
+        return Err(invalid_manifest(format!(
+            "quantized record {source_name:?} block_size is {block_size}, expected {}",
+            nvfp4::BLOCK_SIZE
+        )));
+    }
+
+    let qdata_name = required_manifest_string(record, "qdata_name", source_name)?;
+    let expected_qdata_name = format!("{source_name}.qdata");
+    if qdata_name != expected_qdata_name {
+        return Err(invalid_manifest(format!(
+            "quantized record {source_name:?} names qdata {qdata_name:?}, expected {expected_qdata_name:?}"
+        )));
+    }
+    let qdata_dtype = required_manifest_string(record, "qdata_dtype", source_name)?;
+    require_manifest_string_value(&qdata_dtype, U8_DTYPE, "qdata_dtype", source_name)?;
+    let qdata_shape = required_manifest_shape(record, "qdata_shape", source_name)?;
+    let expected_qdata_shape = packed_shape(&original_shape);
+    require_manifest_shape_value(
+        &qdata_shape,
+        &expected_qdata_shape,
+        "qdata_shape",
+        source_name,
+    )?;
+    let qdata_byte_len = u64::try_from(element_count / nvfp4::VALUES_PER_BYTE)
+        .map_err(|_| invalid_manifest(format!("qdata byte length overflows for {source_name:?}")))?;
+    let qdata_summary = require_companion_summary(
+        summaries_by_name,
+        &qdata_name,
+        U8_DTYPE,
+        &expected_qdata_shape,
+        qdata_byte_len,
+    )?;
+
+    let block_scale_name =
+        required_manifest_string(record, "block_scale_name", source_name)?;
+    let expected_block_scale_name = format!("{source_name}.block_scale");
+    if block_scale_name != expected_block_scale_name {
+        return Err(invalid_manifest(format!(
+            "quantized record {source_name:?} names block scales {block_scale_name:?}, expected {expected_block_scale_name:?}"
+        )));
+    }
+    let block_scale_dtype =
+        required_manifest_string(record, "block_scale_dtype", source_name)?;
+    require_manifest_string_value(
+        &block_scale_dtype,
+        U8_DTYPE,
+        "block_scale_dtype",
+        source_name,
+    )?;
+    let manifest_block_scale_shape =
+        required_manifest_shape(record, "block_scale_shape", source_name)?;
+    let expected_block_scale_shape = block_scale_shape(&original_shape);
+    require_manifest_shape_value(
+        &manifest_block_scale_shape,
+        &expected_block_scale_shape,
+        "block_scale_shape",
+        source_name,
+    )?;
+    let block_scale_byte_len = u64::try_from(element_count / nvfp4::BLOCK_SIZE)
+        .map_err(|_| invalid_manifest(format!("block-scale byte length overflows for {source_name:?}")))?;
+    let block_scale_summary = require_companion_summary(
+        summaries_by_name,
+        &block_scale_name,
+        U8_DTYPE,
+        &expected_block_scale_shape,
+        block_scale_byte_len,
+    )?;
+
+    let global_scale_name =
+        required_manifest_string(record, "global_scale_name", source_name)?;
+    let expected_global_scale_name = format!("{source_name}.global_scale");
+    if global_scale_name != expected_global_scale_name {
+        return Err(invalid_manifest(format!(
+            "quantized record {source_name:?} names global scale {global_scale_name:?}, expected {expected_global_scale_name:?}"
+        )));
+    }
+    let global_scale_dtype =
+        required_manifest_string(record, "global_scale_dtype", source_name)?;
+    require_manifest_string_value(
+        &global_scale_dtype,
+        F32_DTYPE,
+        "global_scale_dtype",
+        source_name,
+    )?;
+    let global_scale_shape =
+        required_manifest_shape(record, "global_scale_shape", source_name)?;
+    let expected_global_scale_shape: &[usize] = &[];
+    require_manifest_shape_value(
+        &global_scale_shape,
+        expected_global_scale_shape,
+        "global_scale_shape",
+        source_name,
+    )?;
+    let global_scale_summary = require_companion_summary(
+        summaries_by_name,
+        &global_scale_name,
+        F32_DTYPE,
+        expected_global_scale_shape,
+        GLOBAL_SCALE_BYTE_LEN,
+    )?;
+
+    require_manifest_string_value(
+        &required_manifest_string(record, "packing", source_name)?,
+        "low-nibble-first",
+        "packing",
+        source_name,
+    )?;
+    require_manifest_string_value(
+        &required_manifest_string(record, "block_scale_encoding", source_name)?,
+        "e4m3-bit-pattern",
+        "block_scale_encoding",
+        source_name,
+    )?;
+    require_manifest_string_value(
+        &required_manifest_string(record, "global_scale_semantics", source_name)?,
+        MODELQ_GLOBAL_SCALE_SEMANTICS,
+        "global_scale_semantics",
+        source_name,
+    )?;
+
+    insert_expected_output_name(expected_output_names, qdata_name.clone())?;
+    insert_expected_output_name(expected_output_names, block_scale_name.clone())?;
+    insert_expected_output_name(expected_output_names, global_scale_name.clone())?;
+
+    let qdata = source
+        .tensor_bytes(&qdata_summary.name)
+        .map_err(|source| Nvfp4ReaderError::Source { source })?;
+    let block_scales = source
+        .tensor_bytes(&block_scale_summary.name)
+        .map_err(|source| Nvfp4ReaderError::Source { source })?;
+    let global_scale_bytes = source
+        .tensor_bytes(&global_scale_summary.name)
+        .map_err(|source| Nvfp4ReaderError::Source { source })?;
+    let global_scale = <[u8; 4]>::try_from(global_scale_bytes)
+        .map(f32::from_le_bytes)
+        .map_err(|_| invalid_manifest("global scale payload is not four bytes"))?;
+    let quantized = nvfp4::QuantizedTensor::from_parts(
+        qdata.to_vec(),
+        block_scales.to_vec(),
+        global_scale,
+        element_count,
+    )
+    .map_err(|source| Nvfp4ReaderError::Quantization {
+        tensor_name: source_name.to_owned(),
+        source,
+    })?;
+    let values = quantized
+        .dequantize()
+        .map_err(|source| Nvfp4ReaderError::Quantization {
+            tensor_name: source_name.to_owned(),
+            source,
+        })?;
+
+    Ok(Nvfp4DecodedTensor {
+        name: source_name.to_owned(),
+        original_dtype,
+        original_shape,
+        values,
+    })
+}
+
+fn require_companion_summary<'a>(
+    summaries_by_name: &'a BTreeMap<String, &TensorSummary>,
+    name: &str,
+    dtype: &str,
+    shape: &[usize],
+    byte_len: u64,
+) -> Result<&'a TensorSummary, Nvfp4ReaderError> {
+    let summary = summaries_by_name
+        .get(name)
+        .copied()
+        .ok_or_else(|| Nvfp4ReaderError::MissingTensor {
+            name: name.to_owned(),
+        })?;
+    validate_summary_descriptor(summary, name, dtype, shape)?;
+    if summary.byte_len != byte_len {
+        return Err(Nvfp4ReaderError::TensorMismatch {
+            name: name.to_owned(),
+            field: "byte_len".to_owned(),
+            expected: byte_len.to_string(),
+            actual: summary.byte_len.to_string(),
+        });
+    }
+    Ok(summary)
+}
+
+fn validate_summary_descriptor(
+    summary: &TensorSummary,
+    name: &str,
+    dtype: &str,
+    shape: &[usize],
+) -> Result<(), Nvfp4ReaderError> {
+    if summary.dtype != dtype {
+        return Err(Nvfp4ReaderError::TensorMismatch {
+            name: name.to_owned(),
+            field: "dtype".to_owned(),
+            expected: dtype.to_owned(),
+            actual: summary.dtype.clone(),
+        });
+    }
+    if summary.shape != shape {
+        return Err(Nvfp4ReaderError::TensorMismatch {
+            name: name.to_owned(),
+            field: "shape".to_owned(),
+            expected: format!("{shape:?}"),
+            actual: format!("{:?}", summary.shape),
+        });
+    }
+    Ok(())
+}
+
+fn insert_expected_output_name(
+    expected_output_names: &mut BTreeSet<String>,
+    name: String,
+) -> Result<(), Nvfp4ReaderError> {
+    if !expected_output_names.insert(name.clone()) {
+        return Err(invalid_manifest(format!(
+            "manifest maps more than one record to output tensor {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn required_manifest_string(
+    object: &Map<String, Value>,
+    key: &str,
+    context: &str,
+) -> Result<String, Nvfp4ReaderError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            invalid_manifest(format!(
+                "{context:?} field {key:?} must be a string"
+            ))
+        })
+}
+
+fn required_manifest_shape(
+    object: &Map<String, Value>,
+    key: &str,
+    context: &str,
+) -> Result<Vec<usize>, Nvfp4ReaderError> {
+    let values = object
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            invalid_manifest(format!("{context:?} field {key:?} must be an array"))
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let dimension = value.as_u64().ok_or_else(|| {
+                invalid_manifest(format!(
+                    "{context:?} field {key:?} dimension {index} must be a non-negative integer"
+                ))
+            })?;
+            usize::try_from(dimension).map_err(|_| {
+                invalid_manifest(format!(
+                    "{context:?} field {key:?} dimension {index} does not fit usize"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn required_manifest_u64(
+    object: &Map<String, Value>,
+    key: &str,
+    context: &str,
+) -> Result<u64, Nvfp4ReaderError> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_manifest(format!("{context:?} field {key:?} must be an integer")))
+}
+
+fn required_manifest_i64(
+    object: &Map<String, Value>,
+    key: &str,
+    context: &str,
+) -> Result<i64, Nvfp4ReaderError> {
+    object
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| invalid_manifest(format!("{context:?} field {key:?} must be an integer")))
+}
+
+fn require_manifest_string_value(
+    actual: &str,
+    expected: &str,
+    field: &str,
+    context: &str,
+) -> Result<(), Nvfp4ReaderError> {
+    if actual != expected {
+        return Err(Nvfp4ReaderError::TensorMismatch {
+            name: context.to_owned(),
+            field: field.to_owned(),
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn require_manifest_shape_value(
+    actual: &[usize],
+    expected: &[usize],
+    field: &str,
+    context: &str,
+) -> Result<(), Nvfp4ReaderError> {
+    if actual != expected {
+        return Err(Nvfp4ReaderError::TensorMismatch {
+            name: context.to_owned(),
+            field: field.to_owned(),
+            expected: format!("{expected:?}"),
+            actual: format!("{actual:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn manifest_element_count(
+    name: &str,
+    shape: &[usize],
+) -> Result<usize, Nvfp4ReaderError> {
+    if shape.is_empty()
+        || shape.contains(&0)
+        || !shape
+            .last()
+            .is_some_and(|&dimension| dimension % nvfp4::BLOCK_SIZE == 0)
+    {
+        return Err(invalid_manifest(format!(
+            "quantized tensor {name:?} shape {shape:?} must have positive dimensions and a final dimension divisible by {}",
+            nvfp4::BLOCK_SIZE
+        )));
+    }
+    shape
+        .iter()
+        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
+        .ok_or_else(|| {
+            invalid_manifest(format!(
+                "quantized tensor {name:?} shape {shape:?} overflows its element count"
+            ))
+        })
+}
+
+fn invalid_manifest(message: impl Into<String>) -> Nvfp4ReaderError {
+    Nvfp4ReaderError::InvalidManifest {
+        message: message.into(),
     }
 }
 
