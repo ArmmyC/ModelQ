@@ -200,10 +200,32 @@ covers:
 - property tests that every finite source value is decoded with its selected
   block/global scale and that no finite block scale encodes as E4M3 NaN or
   infinity; and
-- differential fixtures captured from NVIDIA Model Optimizer's W4A16 NVFP4
-  weight-only recipe and Transformer Engine's NVFP4 quantizer on a Blackwell
-  machine.  The fixtures will record source bytes, packed codes, block-scale
-  bytes, global scale, shape, and software versions.
+- an opt-in differential-fixture harness that can capture a deterministic
+  Transformer Engine 1x16 reference tensor on a Blackwell machine.  The
+  fixture records source F32 bit patterns, packed codes, block-scale bytes,
+  global scale, shape, recipe flags, and software provenance.  A fixture is
+  not checked in until it has been captured on the required hardware; the
+  ignored Rust integration test therefore makes no external-compatibility
+  claim during ordinary CI.
+
+### Differential fixture harness
+
+Task 26 adds `tools/nvfp4_reference.py`, which uses Transformer Engine's
+reference NVFP4 quantizer with its two-level scale hierarchy and with 2D
+quantization, RHT, stochastic rounding, and four-over-six selection disabled.
+It refuses to capture unless
+PyTorch reports a CUDA device with Blackwell-class compute capability and a
+Transformer Engine source commit is supplied.  The JSON schema is versioned
+so future changes to the reference recipe cannot silently reuse an old
+fixture.
+
+`tests/nvfp4_reference.rs` validates the provenance and recipe flags, rebuilds
+the source tensor, and compares ModelQ's packed FP4 bytes, E4M3 block scales,
+F32 decode scale, and reconstructed values.  The test is explicitly ignored
+without a captured fixture; run it with
+`MODELQ_NVFP4_REFERENCE_FIXTURE=/path/to/fixture.json cargo test --test
+nvfp4_reference -- --ignored` after capture.  This is a numerical
+cross-validation harness, not a runtime exporter or GPU backend.
 
 Runtime validation is a separate Level 3/4 gate.  The first path is a tiny
 deterministic matrix/GEMM on an NVIDIA Blackwell GPU (SM100 or later) using a
@@ -255,10 +277,12 @@ reproducible and keeps later recipes measurable.
 This ADR gives the implementation a concrete numerical oracle, grouping rule,
 and conversion sequence while preserving the project's compatibility-level
 honesty.  The native scalar representation, packing, dequantization, and
-shape-boundary checks are implemented in `modelq_quant::nvfp4` without adding
-dependencies or GPU requirements.  The native SafeTensors convention is
-specified in [ADR 0011](0011-nvfp4-native-safetensors-convention.md); a writer
-and any runtime exporter remain separately reviewed work.
+shape-boundary checks, and native SafeTensors planner/writer/reader are
+implemented without adding GPU requirements.  The optional reference-fixture
+harness is available, but an externally captured fixture is still pending.
+The native SafeTensors convention is specified in [ADR
+0011](0011-nvfp4-native-safetensors-convention.md), and any runtime exporter
+remains separately reviewed work.
 
 ## Non-goals
 

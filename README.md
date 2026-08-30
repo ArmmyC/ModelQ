@@ -53,11 +53,21 @@ ModelQ-native low-nibble-first packing, round-trip validation, and a
 shape-aware entry point that checks the final dimension is divisible by 16;
 it does not claim Transformer Engine or TensorRT compatibility.
 
-The future ModelQ-native NVFP4 SafeTensors convention is specified in
+The ModelQ-native NVFP4 SafeTensors convention is specified in
 [ADR 0011](docs/adr/0011-nvfp4-native-safetensors-convention.md). An NVFP4
-SafeTensors planner and writer are now available as a library-only path. They
-emit the ADR 0011 native container and remain runtime-independent: no NVFP4
-CLI flag, runtime exporter, GPU path, or hardware validation is included yet.
+SafeTensors planner, writer, and reader are now available as a library-only
+path. They emit the ADR 0011 native container and remain runtime-independent:
+no NVFP4 CLI flag, runtime exporter, GPU path, or hardware validation is
+included yet.
+
+Task 26 adds an opt-in differential-fixture harness in
+[`tools/nvfp4_reference.py`](tools/nvfp4_reference.py) and
+[`tests/nvfp4_reference.rs`](tests/nvfp4_reference.rs). On a prepared
+Blackwell machine, the tool captures a deterministic Transformer Engine
+1x16 reference fixture; the Rust test then compares ModelQ's packed bytes,
+scales, and reconstructed values. No external fixture is checked in yet
+because this repository has no Blackwell capture environment, so this does
+not claim runtime compatibility.
 
 ## Requirements
 
@@ -88,10 +98,19 @@ cargo test --workspace --all-targets
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo bench --bench cpu_parallel
+python tools/test_nvfp4_reference.py
 ```
 
 To generate the focused GGUF fixture locally:
 
 ```bash
 cargo run -p modelq-io --example gguf_q8_0_fixture -- /tmp/modelq-q8-0.gguf
+```
+
+To validate an already captured NVFP4 reference fixture:
+
+```bash
+python tools/nvfp4_reference.py validate path/to/fixture.json
+MODELQ_NVFP4_REFERENCE_FIXTURE=path/to/fixture.json \
+  cargo test --test nvfp4_reference -- --ignored
 ```
