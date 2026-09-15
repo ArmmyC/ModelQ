@@ -1,8 +1,7 @@
 //! Contract tests for the CPU-only Transformer Engine NVFP4 rowwise profile.
 
 use modelq_io::transformer_engine::{
-    TRANSFORMER_ENGINE_NVFP4_PROFILE, TransformerEngineNvfp4Error,
-    export_transformer_engine_nvfp4,
+    TRANSFORMER_ENGINE_NVFP4_PROFILE, TransformerEngineNvfp4Error, export_transformer_engine_nvfp4,
 };
 use modelq_quant::nvfp4::quantize_shaped;
 
@@ -21,10 +20,20 @@ fn exports_rowwise_data_and_aligned_scale_matrix() {
     assert_eq!(exported.rowwise_data_shape, vec![2, 16]);
     assert_eq!(exported.rowwise_scale_inv_shape, vec![128, 4]);
     assert_eq!(exported.rowwise_data, native.packed_values());
-    assert_eq!(&exported.rowwise_scale_inv[0..2], &native.block_scales()[0..2]);
+    assert_eq!(
+        &exported.rowwise_scale_inv[0..2],
+        &native.block_scales()[0..2]
+    );
     assert_eq!(&exported.rowwise_scale_inv[2..4], &[0, 0]);
-    assert_eq!(&exported.rowwise_scale_inv[4..6], &native.block_scales()[2..4]);
-    assert!(exported.rowwise_scale_inv[6..].iter().all(|&byte| byte == 0));
+    assert_eq!(
+        &exported.rowwise_scale_inv[4..6],
+        &native.block_scales()[2..4]
+    );
+    assert!(
+        exported.rowwise_scale_inv[6..]
+            .iter()
+            .all(|&byte| byte == 0)
+    );
     assert!((exported.amax_rowwise - native.global_scale() * (448.0 * 6.0)).abs() < 1e-6);
     assert_eq!(exported.rowwise_data_name(), "layer.weight.rowwise_data");
     assert_eq!(
@@ -37,9 +46,9 @@ fn exports_rowwise_data_and_aligned_scale_matrix() {
 #[test]
 fn repeated_exports_are_equal() {
     let source = [
-        0.0_f32, 1.0, -2.0, 3.0, 4.0, -5.0, 6.0, -1.0, 0.5, -0.75, 1.25, -1.5, 2.25,
-        -2.5, 3.5, -4.0, 2.0, -3.0, 4.0, -5.0, 6.0, -0.5, 0.75, -1.25, 1.5, -2.25,
-        2.5, -3.5, 4.0, -4.5, 5.0, -6.0,
+        0.0_f32, 1.0, -2.0, 3.0, 4.0, -5.0, 6.0, -1.0, 0.5, -0.75, 1.25, -1.5, 2.25, -2.5, 3.5,
+        -4.0, 2.0, -3.0, 4.0, -5.0, 6.0, -0.5, 0.75, -1.25, 1.5, -2.25, 2.5, -3.5, 4.0, -4.5, 5.0,
+        -6.0,
     ];
     let native = quantize_shaped(&source, &[2, 16]).expect("native shape is valid");
     let first = export_transformer_engine_nvfp4("weight", &[2, 16], &native)
