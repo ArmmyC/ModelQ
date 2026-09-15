@@ -57,8 +57,10 @@ fn exports_rowwise_data_and_aligned_scale_matrix() {
     assert_eq!(exported.rowwise_scale_inv_shape, vec![128, 4]);
     assert_eq!(exported.rowwise_data, native.packed_values());
     assert_eq!(&exported.rowwise_scale_inv[0..2], &native.block_scales()[0..2]);
+    assert_eq!(&exported.rowwise_scale_inv[2..4], &[0, 0]);
     assert_eq!(&exported.rowwise_scale_inv[4..6], &native.block_scales()[2..4]);
     assert!(exported.rowwise_scale_inv[6..].iter().all(|&byte| byte == 0));
+    assert!((exported.amax_rowwise - native.global_scale() * (448.0 * 6.0)).abs() < 1e-6);
     assert_eq!(exported.rowwise_data_name(), "layer.weight.rowwise_data");
     assert_eq!(
         exported.rowwise_scale_inv_name(),
@@ -400,4 +402,3 @@ git push -u origin task-27-transformer-engine-profile
 Do not fast-forward main until hosted branch checks are green. After the
 branch checks pass, fast-forward main, push it, and wait for the main-branch
 checks before reporting the task complete.
-
