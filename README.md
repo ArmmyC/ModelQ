@@ -69,6 +69,15 @@ scales, and reconstructed values. No external fixture is checked in yet
 because this repository has no Blackwell capture environment, so this does
 not claim runtime compatibility.
 
+Task 27 adds a CPU-only Transformer Engine NVFP4 rowwise 1x16 profile planner
+in `modelq_io::transformer_engine`. It maps the native packed E2M1 bytes,
+E4M3 block scales, and tensor amax into explicitly named rowwise fields with
+Transformer Engine's aligned scale shape. The result is profile-valid CPU data
+only: it is not a serialized or runtime-loadable Transformer Engine checkpoint,
+and it does not add CUDA, swizzling, columnwise data, or a hardware claim. See
+[ADR 0012](docs/adr/0012-transformer-engine-nvfp4-export-profile.md) for the
+boundary and follow-up requirements.
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
