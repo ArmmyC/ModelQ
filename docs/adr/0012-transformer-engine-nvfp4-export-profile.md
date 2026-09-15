@@ -135,4 +135,3 @@ This ADR adds one public `modelq-io` module and does not change existing file
 formats, CLI commands, or dependency versions.  Existing ModelQ-native INT8
 and NVFP4 files remain unchanged.  No runtime-compatible fixture is added by
 this decision.
-
