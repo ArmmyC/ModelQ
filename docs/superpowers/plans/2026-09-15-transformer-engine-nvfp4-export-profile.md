@@ -130,7 +130,7 @@ fn exports_zero_amax_for_an_all_zero_tensor() {
 
 - [ ] **Step 3: Run the focused test to confirm it fails for the missing module**
 
-Run: cargo test -p modelq-io --test transformer_engine_nvfp4
+Run: cargo test -p modelq --test transformer_engine_nvfp4
 
 Expected: compilation fails because modelq_io::transformer_engine, the export
 function, the result type, and the error type do not exist yet.
@@ -275,7 +275,7 @@ bytes remain local block decode scales.
 
 - [ ] **Step 7: Run the focused tests and refactor only after green**
 
-Run: cargo test -p modelq-io --test transformer_engine_nvfp4
+Run: cargo test -p modelq --test transformer_engine_nvfp4
 
 Expected: all profile mapping, naming, determinism, validation, and zero-amax
 tests pass.
@@ -343,7 +343,7 @@ git commit -m "docs: record Transformer Engine NVFP4 profile boundary"
 - [ ] **Step 1: Run focused and workspace tests**
 
 ~~~powershell
-cargo test -p modelq-io --test transformer_engine_nvfp4
+cargo test -p modelq --test transformer_engine_nvfp4
 cargo test --workspace --all-targets
 ~~~
 
