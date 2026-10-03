@@ -78,6 +78,16 @@ and it does not add CUDA, swizzling, columnwise data, or a hardware claim. See
 [ADR 0012](docs/adr/0012-transformer-engine-nvfp4-export-profile.md) for the
 boundary and follow-up requirements.
 
+Task 28 adds a SafeTensors writer for one NVFP4 matrix with three rowwise
+fields, a deterministic fixture pair, and a Python bridge pinned to Transformer
+Engine 2.19.0 for one TN GEMM (`second_operand @ weight.T`). CPU container
+validation is available; hardware compatibility is unverified because the
+required Linux Blackwell runtime has not passed. This does not add whole-model
+loading or inference, and no Level 3/4 compatibility is claimed. See
+[ADR 0013](docs/adr/0013-transformer-engine-nvfp4-runtime-container.md) and the
+[tool README](tools/transformer_engine_nvfp4/README.md) for the artifact contract
+and separate CPU/hardware commands.
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
