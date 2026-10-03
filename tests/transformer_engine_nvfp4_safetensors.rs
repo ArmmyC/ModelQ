@@ -148,61 +148,108 @@ fn writes_identical_profile_bytes_deterministically() {
     );
 }
 
-fn assert_invalid(mut profile: TransformerEngineNvfp4Tensor) {
+fn assert_invalid(profile: TransformerEngineNvfp4Tensor) {
     let output = TempArtifact::new("invalid");
     assert!(matches!(
         write_transformer_engine_nvfp4_safetensors(&profile, output.path()),
         Err(WriterError::InvalidTransformerEngineNvfp4Tensor { .. })
     ));
     assert!(!output.path().exists());
-    // Ensure mutability is exercised at the call site rather than hidden in a helper.
-    profile.name.shrink_to_fit();
 }
 
 #[test]
-fn rejects_each_invalid_public_profile_boundary_without_creating_destination() {
+fn rejects_empty_name_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.name.clear();
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_non_rank_two_shape_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.source_shape = vec![32];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_zero_dimension_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.source_shape = vec![0, 32];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_k_not_divisible_by_sixteen_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.source_shape = vec![2, 24];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_overflowing_data_element_count_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.source_shape = vec![usize::MAX, 32];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_overflowing_scale_element_count_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.source_shape = vec![1, usize::MAX - 15];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_incorrect_rowwise_data_shape_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.rowwise_data_shape = vec![1, 32];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_incorrect_rowwise_data_length_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.rowwise_data.pop();
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_incorrect_rowwise_scale_shape_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.rowwise_scale_inv_shape = vec![1, 1];
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_incorrect_rowwise_scale_length_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.rowwise_scale_inv.pop();
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_nonzero_scale_padding_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.rowwise_scale_inv[8] = 1;
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_nonfinite_amax_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.amax_rowwise = f32::INFINITY;
     assert_invalid(p);
+}
+
+#[test]
+fn rejects_negative_amax_without_creating_destination() {
     let mut p = profile_fixture("weight");
     p.amax_rowwise = -1.0;
     assert_invalid(p);
-    let mut p = profile_fixture("weight");
-    p.amax_rowwise = 0.0;
-    assert_invalid(p);
+}
+
+#[test]
+fn rejects_positive_amax_when_logical_scales_are_zero_without_creating_destination() {
     let mut zero = profile_fixture("weight");
     zero.rowwise_scale_inv.fill(0);
     zero.amax_rowwise = 1.0;
@@ -210,11 +257,21 @@ fn rejects_each_invalid_public_profile_boundary_without_creating_destination() {
 }
 
 #[test]
-fn rejects_reserved_name_and_preserves_existing_destination() {
+fn rejects_zero_amax_when_logical_scales_are_nonzero_without_creating_destination() {
+    let mut p = profile_fixture("weight");
+    p.amax_rowwise = 0.0;
+    assert_invalid(p);
+}
+
+#[test]
+fn rejects_reserved_name_without_creating_destination() {
     let mut malformed = profile_fixture("weight");
     malformed.name = "__metadata__".to_owned();
     assert_invalid(malformed);
+}
 
+#[test]
+fn preserves_existing_destination() {
     let existing = TempArtifact::new("existing");
     fs::write(existing.path(), b"preserve me").expect("sentinel writes");
     assert!(matches!(
