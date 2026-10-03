@@ -67,8 +67,10 @@ fn writes_transformer_engine_profile_with_exact_manifest_and_payloads() {
         manifest["profile_id"],
         "transformer-engine.nvfp4.rowwise.1x16.v1"
     );
-    assert_eq!(manifest["runtime"]["name"], "transformer-engine");
-    assert_eq!(manifest["runtime"]["version"], "2.19.0");
+    assert_eq!(
+        manifest["runtime"],
+        json!({"name": "transformer_engine", "version": "2.19.0"})
+    );
     assert_eq!(manifest["tensor_name"], "layer.weight");
     assert_eq!(manifest["logical_shape"], json!([2, 32]));
     assert_eq!(
@@ -83,15 +85,21 @@ fn writes_transformer_engine_profile_with_exact_manifest_and_payloads() {
         manifest["fields"]["amax_rowwise"],
         "layer.weight.amax_rowwise"
     );
-    assert_eq!(manifest["encoding"]["values"], "E2M1");
-    assert_eq!(manifest["encoding"]["scales"], "E4M3");
-    assert_eq!(manifest["encoding"]["block_size"], 16);
     assert_eq!(
-        manifest["encoding"]["scaling"],
-        "rowwise_1x16_tensor_global"
+        manifest["quantization"],
+        json!({
+            "data_format": "E2M1",
+            "block_scale_format": "E4M3",
+            "block_size": 16,
+            "scaling": "rowwise_1x16_tensor_global"
+        })
     );
-    assert_eq!(manifest["scale_padding"]["shape"], json!([128, 4]));
-    assert_eq!(manifest["scale_padding"]["gemm_swizzled"], false);
+    assert_eq!(
+        manifest["scale_storage"],
+        json!({"padding": [128, 4], "gemm_swizzled": false})
+    );
+    assert!(manifest.get("encoding").is_none());
+    assert!(manifest.get("scale_padding").is_none());
     assert_eq!(manifest["global_scale_denominator"], 2688.0);
 
     let tensors = file.tensors().collect::<Vec<_>>();

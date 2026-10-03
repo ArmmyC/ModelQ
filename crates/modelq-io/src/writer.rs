@@ -432,7 +432,7 @@ fn build_transformer_engine_nvfp4_header(
         json_object(BTreeMap::from([
             (
                 "name".to_owned(),
-                Value::String("transformer-engine".to_owned()),
+                Value::String("transformer_engine".to_owned()),
             ),
             ("version".to_owned(), Value::String("2.19.0".to_owned())),
         ])),
@@ -463,10 +463,13 @@ fn build_transformer_engine_nvfp4_header(
         ])),
     );
     manifest.insert(
-        "encoding".to_owned(),
+        "quantization".to_owned(),
         json_object(BTreeMap::from([
-            ("values".to_owned(), Value::String("E2M1".to_owned())),
-            ("scales".to_owned(), Value::String("E4M3".to_owned())),
+            ("data_format".to_owned(), Value::String("E2M1".to_owned())),
+            (
+                "block_scale_format".to_owned(),
+                Value::String("E4M3".to_owned()),
+            ),
             ("block_size".to_owned(), Value::from(16)),
             (
                 "scaling".to_owned(),
@@ -475,11 +478,14 @@ fn build_transformer_engine_nvfp4_header(
         ])),
     );
     manifest.insert(
-        "scale_padding".to_owned(),
+        "scale_storage".to_owned(),
         json_object(BTreeMap::from([
             (
-                "shape".to_owned(),
-                json_shape(&profile.rowwise_scale_inv_shape)?,
+                "padding".to_owned(),
+                Value::Array(vec![
+                    Value::from(TRANSFORMER_ENGINE_NVFP4_SCALE_ROW_ALIGNMENT),
+                    Value::from(TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT),
+                ]),
             ),
             ("gemm_swizzled".to_owned(), Value::Bool(false)),
         ])),
