@@ -694,10 +694,12 @@ git diff main...HEAD --name-only
 
 Expected branch paths are limited to the files listed in this plan, including the approved spec and this plan. There must be no target output, Python bytecode, generated SafeTensors files, Cargo dependency change, CLI feature, or workflow. Final inspection found only the 11 planned paths, no `Cargo.lock` change, and no worktree modifications before this plan-status update.
 
-- [ ] **Step 5: Push the plain-named feature branch after local verification**
+- [x] **Step 5: Push the plain-named feature branch after local verification**
 
 ~~~powershell
 git push -u origin task-28-transformer-engine-nvfp4-container-design
 ~~~
 
 Do not merge into main unless the user explicitly asks. If the GPU proof was unavailable, say so plainly even when every CPU and Rust check passes.
+
+Published to `origin/task-28-transformer-engine-nvfp4-container-design`; no pull request was created and no merge to `main` was performed.
