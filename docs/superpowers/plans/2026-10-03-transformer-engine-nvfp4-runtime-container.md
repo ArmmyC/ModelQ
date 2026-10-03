@@ -670,11 +670,13 @@ Expected: all commands pass with no warnings. Cargo.lock remains unchanged becau
 
 Generate runtime and reference files outside the repository with the fixture example. Reopen them through the Rust reader via the example, run the Rust contract tests, run all Python unittest tests, and run the Python cpu command. Confirm that the runtime artifact contains exactly three tensors and the reference file is separate.
 
+Post-fix verification note: the no-overwrite publisher tests and all `modelq-io` targets passed after the final review fix. A fresh workspace-wide rerun and direct fixture launch were attempted, but Windows Code Integrity blocked unsigned executables under the Enterprise signing-level policy before they started. The other workspace targets, formatting, Clippy, and all 31 Python tests passed; this OS policy was not bypassed.
+
 - [ ] **Step 3: Run the Blackwell test only on an eligible host** — this Windows host is ineligible; hardware proof remains unverified.
 
 If the host meets the documented Linux/CUDA/driver/cuDNN/TE/Blackwell prerequisites, run the explicit runtime command and preserve its printed environment and error metrics in the task report. If it cannot run here, leave the status unverified and do not call it a passing test.
 
-- [ ] **Step 4: Inspect the final file list and status**
+- [x] **Step 4: Inspect the final file list and status**
 
 Track the approved plan as its own documentation commit before the final diff review:
 
@@ -690,7 +692,7 @@ git diff main...HEAD --stat
 git diff main...HEAD --name-only
 ~~~
 
-Expected branch paths are limited to the files listed in this plan, including the approved spec and this plan. There must be no target output, Python bytecode, generated SafeTensors files, Cargo dependency change, CLI feature, or workflow.
+Expected branch paths are limited to the files listed in this plan, including the approved spec and this plan. There must be no target output, Python bytecode, generated SafeTensors files, Cargo dependency change, CLI feature, or workflow. Final inspection found only the 11 planned paths, no `Cargo.lock` change, and no worktree modifications before this plan-status update.
 
 - [ ] **Step 5: Push the plain-named feature branch after local verification**
 
