@@ -117,7 +117,7 @@ def validate_container(path: pathlib.Path) -> ValidatedArtifact:
         with safe_open(str(path), framework="np") as reader:
             metadata = reader.metadata() or {}
             tensors = {name: reader.get_tensor(name) for name in reader.keys()}
-    except (OSError, SafetensorError) as error:
+    except (OSError, SafetensorError, TypeError) as error:
         raise ValidationError(f"{path}: cannot read SafeTensors artifact: {error}") from error
     _require("modelq.manifest" in metadata, "missing modelq.manifest metadata")
     try:
@@ -134,7 +134,7 @@ def validate_reference(path: pathlib.Path, expected_shape: tuple[int, int]) -> n
         with safe_open(str(path), framework="np") as reader:
             metadata = reader.metadata() or {}
             tensors = {name: reader.get_tensor(name) for name in reader.keys()}
-    except (OSError, SafetensorError) as error:
+    except (OSError, SafetensorError, TypeError) as error:
         raise ValidationError(f"{path}: cannot read reference SafeTensors: {error}") from error
     _require(metadata.get("modelq.reference_schema") == REFERENCE_SCHEMA,
              f"modelq.reference_schema must be {REFERENCE_SCHEMA}")

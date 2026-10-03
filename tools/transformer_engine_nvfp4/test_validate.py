@@ -67,6 +67,33 @@ def write_reference(path, *, values=None, schema="transformer-engine-nvfp4-refer
     return pathlib.Path(path)
 
 
+def write_bf16_file(path, *, reference):
+    """Write valid SafeTensors bytes containing a NumPy-unsupported BF16 entry."""
+    if reference:
+        metadata = {"modelq.reference_schema": "transformer-engine-nvfp4-reference-v1"}
+        entries = [("weight.dequantized_reference", "BF16", [2, 16], bytes(64))]
+    else:
+        metadata = {
+            "modelq.format": "transformer-engine-nvfp4-safetensors-v1",
+            "modelq.manifest": json.dumps(VALID_MANIFEST, sort_keys=True, separators=(",", ":")),
+        }
+        entries = [
+            ("weight.rowwise_data", "BF16", [2, 8], bytes(32)),
+            ("weight.rowwise_scale_inv", "U8", [128, 4], bytes(512)),
+            ("weight.amax_rowwise", "F32", [1], bytes(4)),
+        ]
+    header = {"__metadata__": metadata}
+    payload = bytearray()
+    for name, dtype, shape, data in entries:
+        start = len(payload)
+        payload.extend(data)
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [start, len(payload)]}
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    header_bytes += b" " * (-len(header_bytes) % 8)
+    path.write_bytes(len(header_bytes).to_bytes(8, "little") + header_bytes + payload)
+    return path
+
+
 class ValidatorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -207,6 +234,20 @@ class ValidatorTests(unittest.TestCase):
             metadata={"modelq.reference_schema": "transformer-engine-nvfp4-reference-v1"},
         )
         with self.assertRaisesRegex(validate.ValidationError, "tensor"):
+            validate.validate_reference(path, (2, 16))
+
+    def test_container_bf16_decode_error_is_validation_error(self):
+        path = write_bf16_file(self.temp_directory / "bf16-container.safetensors", reference=False)
+        with self.assertRaisesRegex(
+            validate.ValidationError, "bf16-container.safetensors.*cannot read SafeTensors artifact"
+        ):
+            validate.validate_container(path)
+
+    def test_reference_bf16_decode_error_is_validation_error(self):
+        path = write_bf16_file(self.temp_directory / "bf16-reference.safetensors", reference=True)
+        with self.assertRaisesRegex(
+            validate.ValidationError, "bf16-reference.safetensors.*cannot read reference SafeTensors"
+        ):
             validate.validate_reference(path, (2, 16))
 
 
