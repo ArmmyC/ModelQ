@@ -250,6 +250,86 @@ class ValidatorTests(unittest.TestCase):
         ):
             validate.validate_reference(path, (2, 16))
 
+    def test_runtime_preflight_rejects_wrong_te_version(self):
+        with self.assertRaisesRegex(validate.ValidationError, "2.19.0"):
+            validate.validate_runtime_preflight("Linux", "x86_64", "2.19.1", True, "12.8", 90300, (10, 0))
+
+    def test_runtime_preflight_rejects_missing_cuda(self):
+        with self.assertRaisesRegex(validate.ValidationError, "CUDA"):
+            validate.validate_runtime_preflight("Linux", "x86_64", "2.19.0", False, None, None, None)
+
+    def test_runtime_preflight_rejects_old_cuda_and_cudnn(self):
+        with self.assertRaisesRegex(validate.ValidationError, "CUDA 12.8"):
+            validate.validate_runtime_preflight("Linux", "x86_64", "2.19.0", True, "12.1", 90300, (10, 0))
+        with self.assertRaisesRegex(validate.ValidationError, "cuDNN 9.3"):
+            validate.validate_runtime_preflight("Linux", "x86_64", "2.19.0", True, "12.8", 90200, (10, 0))
+
+    def test_runtime_preflight_rejects_pre_blackwell_gpu(self):
+        with self.assertRaisesRegex(validate.ValidationError, "compute capability"):
+            validate.validate_runtime_preflight("Linux", "x86_64", "2.19.0", True, "12.8", 90300, (9, 0))
+
+    def test_runtime_preflight_rejects_unsupported_platform(self):
+        with self.assertRaisesRegex(validate.ValidationError, "Linux"):
+            validate.validate_runtime_preflight("Windows", "x86_64", "2.19.0", True, "12.8", 90300, (10, 0))
+        with self.assertRaisesRegex(validate.ValidationError, "x86_64"):
+            validate.validate_runtime_preflight("Linux", "aarch64", "2.19.0", True, "12.8", 90300, (10, 0))
+
+    def test_runtime_preflight_accepts_supported_environment(self):
+        self.assertIsNone(validate.validate_runtime_preflight(
+            "Linux", "AMD64", "2.19.0", True, "12.8", 90300, (10, 0)
+        ))
+
+    def test_cpu_fixture_does_not_import_gpu_dependencies(self):
+        artifact_path = write_artifact(self.temp_directory / "runtime.safetensors")
+        reference_path = write_reference(self.temp_directory / "reference.safetensors")
+        real_import = builtins.__import__
+
+        def reject_gpu_imports(name, *args, **kwargs):
+            if name == "torch" or name.startswith("transformer_engine"):
+                raise AssertionError(f"CPU validation imported {name}")
+            return real_import(name, *args, **kwargs)
+
+        with unittest.mock.patch("builtins.__import__", side_effect=reject_gpu_imports):
+            artifact, reference = validate.validate_cpu_fixture(artifact_path, reference_path)
+        self.assertEqual(artifact.manifest["logical_shape"], [2, 16])
+        self.assertEqual(reference.shape, (2, 16))
+
+    def test_runtime_validates_artifacts_before_platform_or_gpu_imports(self):
+        artifact_path = write_artifact(self.temp_directory / "runtime.safetensors")
+        reference_path = write_reference(
+            self.temp_directory / "reference.safetensors",
+            values=np.zeros((1, 16), dtype=np.float32),
+        )
+        with self.assertRaisesRegex(validate.ValidationError, "shape"):
+            validate.run_blackwell_gemm(artifact_path, reference_path)
+
+    def test_runtime_rejects_windows_before_gpu_imports(self):
+        manifest = copy.deepcopy(VALID_MANIFEST)
+        manifest["logical_shape"] = [64, 64]
+        tensors = {
+            "weight.rowwise_data": np.zeros((64, 32), dtype=np.uint8),
+            "weight.rowwise_scale_inv": np.zeros((128, 4), dtype=np.uint8),
+            "weight.amax_rowwise": np.zeros((1,), dtype=np.float32),
+        }
+        artifact_path = write_artifact(
+            self.temp_directory / "runtime.safetensors", manifest=manifest, tensors=tensors
+        )
+        reference_path = write_reference(
+            self.temp_directory / "reference.safetensors",
+            values=np.zeros((64, 64), dtype=np.float32),
+        )
+        real_import = builtins.__import__
+
+        def reject_gpu_imports(name, *args, **kwargs):
+            if name == "torch" or name.startswith("transformer_engine"):
+                raise AssertionError(f"runtime imported {name} before platform preflight")
+            return real_import(name, *args, **kwargs)
+
+        with unittest.mock.patch("builtins.__import__", side_effect=reject_gpu_imports):
+            with unittest.mock.patch.object(validate.platform, "system", return_value="Windows"):
+                with self.assertRaisesRegex(validate.ValidationError, "Linux"):
+                    validate.run_blackwell_gemm(artifact_path, reference_path)
+
 
 if __name__ == "__main__":
     unittest.main()

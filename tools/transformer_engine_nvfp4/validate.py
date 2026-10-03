@@ -1,11 +1,14 @@
-"""CPU validation for the ModelQ Transformer Engine NVFP4 SafeTensors profile."""
+"""Validate the ModelQ Transformer Engine NVFP4 container and optional GEMM."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import importlib.metadata
 import json
 import pathlib
+import platform
+import subprocess
 import sys
 from typing import Any
 
@@ -155,14 +158,166 @@ def validate_cpu_fixture(
     return artifact, reference
 
 
+def validate_runtime_preflight(
+    system: str,
+    machine: str,
+    te_version: str,
+    cuda_available: bool,
+    cuda_version: str | None,
+    cudnn_version: int | None,
+    capability: tuple[int, int] | None,
+) -> None:
+    """Reject any environment outside the pinned Blackwell proof boundary."""
+    _validate_runtime_platform(system, machine)
+    _require(te_version == "2.19.0", "runtime proof requires Transformer Engine 2.19.0")
+    _require(cuda_available, "runtime proof requires an available CUDA GPU")
+    try:
+        cuda_numbers = tuple(int(part) for part in cuda_version.split(".")[:2]) if cuda_version else ()
+    except ValueError:
+        cuda_numbers = ()
+    _require(len(cuda_numbers) == 2 and cuda_numbers >= (12, 8),
+             "runtime proof requires CUDA 12.8 or newer")
+    _require(cudnn_version is not None and cudnn_version >= 90300,
+             "runtime proof requires cuDNN 9.3 or newer (90300)")
+    _require(capability is not None and capability[0] >= 10,
+             "runtime proof requires compute capability 10.0 or newer")
+
+
+def _validate_runtime_platform(system: str, machine: str) -> None:
+    _require(system == "Linux", "runtime proof requires Linux")
+    _require(machine.lower() in ("x86_64", "amd64"), "runtime proof requires x86_64")
+
+
+def run_blackwell_gemm(
+    artifact_path: pathlib.Path, reference_path: pathlib.Path
+) -> dict[str, Any]:
+    """Run the explicit TE 2.19.0 TN GEMM against the Rust F32 oracle."""
+    artifact, reference_values = validate_cpu_fixture(artifact_path, reference_path)
+    manifest = artifact.manifest
+    _require(manifest["logical_shape"] == [64, 64],
+             "runtime proof requires logical_shape [64, 64]")
+
+    system, machine = platform.system(), platform.machine()
+    _validate_runtime_platform(system, machine)
+    try:
+        te_version = importlib.metadata.version("transformer-engine")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise ValidationError("runtime proof requires Transformer Engine 2.19.0 package") from error
+    _require(te_version == "2.19.0", "runtime proof requires Transformer Engine 2.19.0")
+
+    try:
+        import torch
+    except ImportError as error:
+        raise ValidationError(f"runtime proof requires CUDA-enabled PyTorch: {error}") from error
+    cuda_available = torch.cuda.is_available()
+    cuda_version = torch.version.cuda
+    cudnn_version = torch.backends.cudnn.version()
+    capability = torch.cuda.get_device_capability() if cuda_available else None
+    validate_runtime_preflight(
+        system, machine, te_version, cuda_available, cuda_version, cudnn_version, capability
+    )
+    device = torch.device("cuda", torch.cuda.current_device())
+    gpu_name = torch.cuda.get_device_name()
+    try:
+        driver_result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ValidationError(f"cannot query NVIDIA driver with nvidia-smi: {error}") from error
+    driver = driver_result.stdout.strip().splitlines()
+    _require(bool(driver) and bool(driver[0].strip()),
+             "nvidia-smi returned no NVIDIA driver version")
+
+    try:
+        from transformer_engine.pytorch.constants import DType
+        from transformer_engine.pytorch import NVFP4Quantizer, NVFP4Tensor
+        from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+
+        fields = manifest["fields"]
+        rowwise_data = torch.as_tensor(artifact.tensors[fields["rowwise_data"]], device=device)
+        rowwise_scale_inv = torch.as_tensor(
+            artifact.tensors[fields["rowwise_scale_inv"]], device=device
+        )
+        amax_rowwise = torch.as_tensor(artifact.tensors[fields["amax_rowwise"]], device=device)
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=False,
+            with_2d_quantization=False,
+            with_rht=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=False,
+        )
+        weight = NVFP4Tensor(
+            shape=(64, 64),
+            dtype=torch.float32,
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            amax_rowwise=amax_rowwise,
+            amax_columnwise=None,
+            fp4_dtype=DType.kFloat4E2M1,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=False,
+            row_scaled_nvfp4=False,
+            nvfp4_use_4over6=False,
+            device=device,
+        )
+        with torch.no_grad():
+            reference_weight = torch.as_tensor(reference_values, dtype=torch.float32, device=device)
+            indices = torch.arange(4096, dtype=torch.int32, device=device)
+            rhs_values = (((indices * 37) % 251) - 125).to(torch.float32).div_(32.0).reshape(64, 64)
+            torch.testing.assert_close(
+                weight.dequantize(dtype=torch.float32), reference_weight, rtol=1e-5, atol=1e-5
+            )
+            rhs_quantized = quantizer.quantize(rhs_values)
+            rhs_dequantized = rhs_quantized.dequantize(dtype=torch.float32)
+            out, _, _, _ = general_gemm(
+                weight, rhs_quantized, out_dtype=torch.float32, layout="TN"
+            )
+            expected = reference_weight.T @ rhs_dequantized
+            _require(tuple(out.shape) == (64, 64),
+                     f"TN GEMM output shape must be (64, 64), got {tuple(out.shape)}")
+            _require(bool(torch.isfinite(out).all().item()), "TN GEMM output must be finite")
+            torch.testing.assert_close(out, expected, rtol=0.125, atol=0.0675)
+            max_abs_error = (out - expected).abs().max().item()
+    except Exception as error:
+        if isinstance(error, ValidationError):
+            raise
+        raise ValidationError(f"Transformer Engine NVFP4 TN GEMM failed: {error}") from error
+
+    return {
+        "max_abs_error": max_abs_error,
+        "python": platform.python_version(),
+        "pytorch": torch.__version__,
+        "cuda_runtime": cuda_version,
+        "cudnn": cudnn_version,
+        "driver": driver[0].strip(),
+        "transformer_engine": te_version,
+        "gpu": gpu_name,
+        "compute_capability": f"{capability[0]}.{capability[1]}",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     cpu = commands.add_parser("cpu", help="validate SafeTensors fields without CUDA")
     cpu.add_argument("artifact", type=pathlib.Path)
     cpu.add_argument("reference", type=pathlib.Path)
+    runtime = commands.add_parser("runtime", help="run one TE 2.19.0 Blackwell TN GEMM")
+    runtime.add_argument("artifact", type=pathlib.Path)
+    runtime.add_argument("reference", type=pathlib.Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == "runtime":
+            report = run_blackwell_gemm(args.artifact, args.reference)
+            for key, value in report.items():
+                print(f"{key}={value}")
+            return 0
         artifact, _ = validate_cpu_fixture(args.artifact, args.reference)
     except ValidationError as error:
         print(f"validation failed: {error}", file=sys.stderr)
