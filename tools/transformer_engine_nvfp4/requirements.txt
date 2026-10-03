@@ -1,0 +1,3 @@
+numpy>=1.24,<3
+safetensors>=0.4,<1
+transformer-engine[pytorch]==2.19.0
