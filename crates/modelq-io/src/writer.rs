@@ -259,6 +259,18 @@ pub fn write_safetensors(
     Ok(())
 }
 
+fn publish_nvfp4_output(temporary_path: &Path, destination: &Path) -> Result<(), WriterError> {
+    match fs::hard_link(temporary_path, destination) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            Err(WriterError::DestinationExists {
+                path: destination.to_owned(),
+            })
+        }
+        Err(source) => Err(io_error(destination, source)),
+    }
+}
+
 /// Writes a validated Transformer Engine NVFP4 rowwise profile as SafeTensors.
 ///
 /// The profile buffers are checked before the destination is touched. The
@@ -280,7 +292,7 @@ pub fn write_transformer_engine_nvfp4_safetensors(
 
     let header = build_transformer_engine_nvfp4_header(profile)?;
     let (temporary_path, mut file) = create_temporary_file(&destination)?;
-    let mut temporary = TemporaryOutput::new(temporary_path.clone());
+    let _temporary = TemporaryOutput::new(temporary_path.clone());
     let write_result = (|| {
         file.write_all(&header)
             .map_err(|source| io_error(&destination, source))?;
@@ -295,11 +307,7 @@ pub fn write_transformer_engine_nvfp4_safetensors(
     })();
     drop(file);
     write_result?;
-    if destination.exists() {
-        return Err(WriterError::DestinationExists { path: destination });
-    }
-    fs::rename(&temporary_path, &destination).map_err(|source| io_error(&destination, source))?;
-    temporary.committed = true;
+    publish_nvfp4_output(&temporary_path, &destination)?;
     Ok(())
 }
 
@@ -914,5 +922,58 @@ impl Drop for TemporaryOutput {
         if !self.committed {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "modelq-{label}-{}",
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn nvfp4_publication_preserves_destination_created_before_publish_and_cleans_temp() {
+        let dir = test_dir("nvfp4-publication-collision");
+        let destination = dir.join("artifact.safetensors");
+        let temporary_path = dir.join("artifact.tmp");
+        fs::write(&temporary_path, b"new output").unwrap();
+        let temporary = TemporaryOutput::new(temporary_path.clone());
+        fs::write(&destination, b"existing bytes").unwrap();
+
+        let result = publish_nvfp4_output(&temporary_path, &destination);
+
+        assert!(matches!(result, Err(WriterError::DestinationExists { .. })));
+        assert_eq!(fs::read(&destination).unwrap(), b"existing bytes");
+        drop(temporary);
+        assert!(!temporary_path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nvfp4_publication_rejects_dangling_symlink_and_cleans_temp() {
+        use std::os::unix::fs::symlink;
+
+        let dir = test_dir("nvfp4-publication-symlink");
+        let destination = dir.join("artifact.safetensors");
+        let temporary_path = dir.join("artifact.tmp");
+        fs::write(&temporary_path, b"new output").unwrap();
+        let temporary = TemporaryOutput::new(temporary_path.clone());
+        symlink(dir.join("missing-target"), &destination).unwrap();
+
+        let result = publish_nvfp4_output(&temporary_path, &destination);
+
+        assert!(matches!(result, Err(WriterError::DestinationExists { .. })));
+        assert!(fs::symlink_metadata(&destination).is_ok());
+        drop(temporary);
+        assert!(!temporary_path.exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

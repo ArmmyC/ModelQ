@@ -97,12 +97,18 @@ fn write_reference_safetensors(values: &[f32], destination: &Path) -> Result<(),
     })();
     drop(file);
     write_result.map_err(|error| format!("{}: {error}", destination.display()))?;
-    if destination.exists() {
-        return Err(format!("{}: destination already exists", destination.display()).into());
-    }
-    fs::rename(&temporary.0, destination)
-        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    publish_reference_output(&temporary.0, destination)?;
     Ok(())
+}
+
+fn publish_reference_output(temporary: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    match fs::hard_link(temporary, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(format!("{}: destination already exists", destination.display()).into())
+        }
+        Err(error) => Err(format!("{}: {error}", destination.display()).into()),
+    }
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -163,6 +169,30 @@ fn run() -> Result<(), Box<dyn Error>> {
         reference_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn reference_publication_preserves_destination_created_before_publish_and_cleans_temp() {
+        let dir = env::temp_dir().join(format!("modelq-reference-publication-{}", process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("reference.safetensors");
+        let temporary_path = dir.join("reference.tmp");
+        fs::write(&temporary_path, b"new output").unwrap();
+        let temporary = TemporaryOutput(temporary_path.clone());
+        fs::write(&destination, b"existing bytes").unwrap();
+
+        let result = publish_reference_output(&temporary_path, &destination);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing bytes");
+        drop(temporary);
+        assert!(!temporary_path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn main() {
