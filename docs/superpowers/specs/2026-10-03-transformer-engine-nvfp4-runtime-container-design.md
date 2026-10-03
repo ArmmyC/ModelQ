@@ -28,7 +28,7 @@ This proves a narrow compatibility path for one matrix and one operation. It doe
 
 ADR 0012 defines `transformer-engine.nvfp4.rowwise.1x16.v1` as a CPU-only mapping with three logical fields: packed rowwise E2M1 data, a 128-by-4-aligned rowwise E4M3 scale matrix, and a one-element F32 rowwise amax. It explicitly does not provide a container, a Transformer Engine tensor object, columnwise data, GEMM scale swizzling, or a hardware compatibility claim.
 
-Transformer Engine v2.19.0 is the selected runtime version. Its `NVFP4Tensor` source accepts optional columnwise fields, and its `general_gemm` implementation selects rowwise or columnwise representations according to the TN layout and operand role. In TN layout, the first operand uses its rowwise representation and the second operand uses its rowwise representation. The proposed test therefore places the exported weight in the first, transposed operand position and quantizes a synthetic second operand with Transformer Engine. This is one specific tested usage, not a claim that a rowwise-only tensor supports every Transformer Engine operation. See the [v2.19 NVFP4 tensor source](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/tensor/nvfp4_tensor.py) and [v2.19 GEMM source](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/cpp_extensions/gemm.py).
+Transformer Engine v2.19.0 is the selected runtime version. Its `NVFP4Tensor` source accepts optional columnwise fields, and its `general_gemm` implementation selects rowwise or columnwise representations according to the TN layout and operand role. In TN layout, both operands use their rowwise representations. For `general_gemm(weight, second_operand, layout="TN")`, the v2.19 PyTorch wrapper's row-major operation is `second_operand @ weight.T`: TN logically transposes the first operand, but it does not mean `weight.T @ second_operand`. The test therefore keeps the exported weight in the first operand slot and quantizes a synthetic second operand with Transformer Engine. This is one specific tested usage, not a claim that a rowwise-only tensor supports every Transformer Engine operation. See the [v2.19 NVFP4 tensor source](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/tensor/nvfp4_tensor.py), [v2.19 Python GEMM wrapper](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/cpp_extensions/gemm.py), and [v2.19 C++ shape contract](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/csrc/extensions/gemm.cpp).
 
 The v2.19 installation guide requires Linux x86_64, CUDA 12.1 or newer (12.8 or newer for Blackwell), a compatible NVIDIA driver, and cuDNN 9.3 or newer. The NVFP4 guide requires SM100/Blackwell or later. These requirements make the runtime proof an optional Linux hardware test; they do not affect the cross-platform Rust library. See the [v2.19 installation guide](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/docs/installation.rst) and [NVFP4 guide](https://nvidia.github.io/TransformerEngine/features/low_precision_training/nvfp4/nvfp4.html).
 
@@ -36,7 +36,7 @@ The v2.19 installation guide requires Linux x86_64, CUDA 12.1 or newer (12.8 or 
 
 ### 1. Scope: one matrix and one GEMM
 
-The test artifact contains one logical rank-two weight matrix of shape `[M, K]`, with `K` divisible by 16. A deterministic synthetic second operand has shape `[M, N]`. The test computes one TN GEMM, `weight.T @ second_operand`, and expects an output of shape `[K, N]`.
+The test artifact contains one logical rank-two weight matrix of shape `[64, 64]`. A deterministic synthetic second operand also has shape `[64, 64]`. The test computes one TN GEMM with the exported weight first and the synthetic operand second. Under Transformer Engine 2.19's TN convention this is `second_operand @ weight.T`, with output shape `[64, 64]`. These fixed square shapes define this proof; it does not claim a general shape contract for other matrix dimensions.
 
 The exported matrix is consumed unchanged as the first GEMM operand. Transformer Engine quantizes only the synthetic second operand for the test. No ModelQ activation-quantization feature is added.
 
@@ -85,7 +85,7 @@ The artifact does not contain a Python pickle, a Torch checkpoint, or test-only 
 
 A separate Python tool reads SafeTensors and validates its metadata and field shapes before attempting CUDA work. It constructs a v2.19.0 `NVFP4Tensor` from the rowwise tensors with columnwise data set to `None`, `fp4_dtype` set to E2M1, and GEMM-swizzled-scale state set to false. Its `NVFP4Quantizer` is configured for rowwise 1x16 scaling, with 2D scaling, RHT, stochastic rounding, and 4over6 disabled. The bridge does not requantize or transpose the exported weight.
 
-For the GEMM, the bridge uses the v2.19.0 `general_gemm` TN path with the exported weight as the first operand. Transformer Engine owns any runtime-only layout preparation required by that path. Runtime-prepared buffers are temporary and are not written back to the artifact.
+For the GEMM, the bridge uses the v2.19.0 `general_gemm` TN path with the exported weight as the first operand and the synthetic second operand as the second. The resulting PyTorch operation is `second_operand @ weight.T`; Transformer Engine owns any runtime-only layout preparation required by that path. Runtime-prepared buffers are temporary and are not written back to the artifact.
 
 The optional Python environment pins `transformer-engine==2.19.0` and its Python-side dependencies separately from Cargo. The validator reports the exact Python, PyTorch, CUDA runtime, driver, Transformer Engine, and GPU versions used. Cargo.toml/Cargo.lock gain no Transformer Engine, CUDA, or Python dependencies.
 
@@ -96,7 +96,7 @@ A small Rust example generates a deterministic 64-by-64 test matrix, applies the
 The Python validator creates a deterministic `[64,64]` second operand with Transformer Engine's deterministic 1x16 NVFP4 quantizer, dequantizes that operand for the reference, and compares the TE GEMM result against:
 
 ```text
-ModelQ-dequantized exported weight.T @ TE-dequantized second operand
+TE-dequantized second operand @ ModelQ-dequantized exported weight.T
 ```
 
 The GEMM result must have shape `[64,64]`, contain only finite values, and satisfy `torch.testing.assert_close` with the fixed tolerance `rtol=0.125` and `atol=0.0675`. Before the GEMM, the bridge also checks that TE's loaded/dequantized weight agrees with the Rust-generated ModelQ reference at `rtol=1e-5` and `atol=1e-5`. The validator reports maximum absolute error and the environment versions on success.
@@ -143,7 +143,7 @@ The first five checks can establish representation/container correctness. Only a
 
 - **Serialize a pickled `NVFP4Tensor`:** rejected because the artifact would depend on Python object serialization and a specific library object version rather than a safe, explicit tensor container.
 - **Call the ModelQ-native NVFP4 SafeTensors convention a TE checkpoint:** rejected because ADR 0011 and ADR 0012 define different field names, padding, and scale metadata. The new artifact needs its own explicit profile manifest and runtime check.
-- **Store or manufacture columnwise weight data:** rejected for this single TN proof. It is absent from the current profile, and generating a new direction could change quantization semantics. The test chooses the documented TN operand slot that consumes the available rowwise representation; a compatibility failure is surfaced rather than hidden.
+- **Store or manufacture columnwise weight data:** rejected for this single TN proof. It is absent from the current profile, and generating a new direction could change quantization semantics. The test chooses the v2.19 TN operand slots that consume the available rowwise representations; the actual row-major operation is `second_operand @ weight.T`, and a compatibility failure is surfaced rather than hidden.
 - **Add TE/CUDA to the Rust build or run the GPU test in ordinary CI:** rejected to keep Rust CPU-only and the cross-platform fallback intact. Runtime validation remains an explicit external hardware test.
 - **Load a whole transformer model:** rejected because it would add architecture, checkpoint, activation, and inference concerns beyond the approved single-matrix proof.
 

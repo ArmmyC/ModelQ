@@ -279,6 +279,15 @@ class ValidatorTests(unittest.TestCase):
             "Linux", "AMD64", "2.19.0", True, "12.8", 90300, (10, 0)
         ))
 
+    def test_tn_reference_output_uses_rhs_times_weight_transpose(self):
+        weight = np.array([[1, 2], [3, 4]], dtype=np.float32)
+        rhs = np.array([[5, 6], [7, 8]], dtype=np.float32)
+        self.assertTrue(callable(getattr(validate, "tn_reference_output", None)))
+        actual = validate.tn_reference_output(rhs, weight)
+        np.testing.assert_array_equal(
+            actual, np.array([[17, 39], [23, 53]], dtype=np.float32)
+        )
+
     def test_cpu_fixture_does_not_import_gpu_dependencies(self):
         artifact_path = write_artifact(self.temp_directory / "runtime.safetensors")
         reference_path = write_reference(self.temp_directory / "reference.safetensors")

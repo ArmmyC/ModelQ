@@ -188,6 +188,11 @@ def _validate_runtime_platform(system: str, machine: str) -> None:
     _require(machine.lower() in ("x86_64", "amd64"), "runtime proof requires x86_64")
 
 
+def tn_reference_output(rhs: Any, weight: Any) -> Any:
+    """Return the row-major product computed by TE's TN operand convention."""
+    return rhs @ weight.T
+
+
 def run_blackwell_gemm(
     artifact_path: pathlib.Path, reference_path: pathlib.Path
 ) -> dict[str, Any]:
@@ -278,7 +283,7 @@ def run_blackwell_gemm(
             out, _, _, _ = general_gemm(
                 weight, rhs_quantized, out_dtype=torch.float32, layout="TN"
             )
-            expected = reference_weight.T @ rhs_dequantized
+            expected = tn_reference_output(rhs_dequantized, reference_weight)
             _require(tuple(out.shape) == (64, 64),
                      f"TN GEMM output shape must be (64, 64), got {tuple(out.shape)}")
             _require(bool(torch.isfinite(out).all().item()), "TN GEMM output must be finite")
