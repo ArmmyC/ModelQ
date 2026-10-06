@@ -6,15 +6,16 @@
 //! without materializing a whole tensor.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
+use crate::output::OutputTarget;
 use modelq::{
     diagnostics::reconstruction_metrics_streaming,
     io::{
         nvfp4::{Nvfp4OutputPlan, Nvfp4OutputRole, plan_nvfp4_output, write_nvfp4_safetensors},
-        safetensors::{MappedSafetensors, TensorSource, TensorSummary},
+        safetensors::{TensorSource, TensorSummary},
         sharded::SafetensorsInput,
     },
     quant::{
@@ -57,13 +58,17 @@ struct Nvfp4Report {
 }
 
 /// Runs the command and prints progress and the final report.
-pub fn run(input: &Path, output: &Path, options: &Nvfp4Options) -> Result<(), String> {
-    let report = quantize(input, output, options)?;
+pub fn run(input: &Path, target: &OutputTarget, options: &Nvfp4Options) -> Result<(), String> {
+    let report = quantize(input, target, options)?;
     print_report(&report);
     Ok(())
 }
 
-fn quantize(input: &Path, output: &Path, options: &Nvfp4Options) -> Result<Nvfp4Report, String> {
+fn quantize(
+    input: &Path,
+    target: &OutputTarget,
+    options: &Nvfp4Options,
+) -> Result<Nvfp4Report, String> {
     println!("Inspecting source: {}", input.display());
     let source = SafetensorsInput::open(input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();
@@ -113,18 +118,42 @@ fn quantize(input: &Path, output: &Path, options: &Nvfp4Options) -> Result<Nvfp4
     );
     print_decisions(&decisions);
 
-    println!("Writing output: {}", output.display());
-    write_nvfp4_safetensors(&source, &plan, output)
-        .map_err(|error| format!("could not write output: {error}"))?;
+    println!("Writing output: {}", target.describe());
+    let mut sized: BTreeMap<String, u64> = BTreeMap::new();
+    for tensor in &plan.tensors {
+        *sized.entry(tensor.source_name.clone()).or_default() += tensor.byte_len;
+    }
+    let sized: Vec<(String, u64)> = sized.into_iter().collect();
+    let written = target.write(&source, &sized, |subset, path| {
+        let subset_summaries = subset.tensor_summaries();
+        let subset_names: BTreeSet<&str> = subset_summaries
+            .iter()
+            .map(|summary| summary.name.as_str())
+            .collect();
+        let subset_selected: Vec<String> = selected
+            .iter()
+            .filter(|name| subset_names.contains(name.as_str()))
+            .cloned()
+            .collect();
+        let subset_plan = plan_nvfp4_output(&subset_summaries, &subset_selected)
+            .map_err(|error| format!("could not plan shard: {error}"))?;
+        write_nvfp4_safetensors(subset, &subset_plan, path).map_err(|error| error.to_string())?;
+        Ok::<_, String>(
+            subset_plan
+                .tensors
+                .iter()
+                .map(|tensor| (tensor.name.clone(), tensor.byte_len))
+                .collect(),
+        )
+    })?;
 
     println!("Validating output by reopening and dequantizing it...");
-    let output_reader = MappedSafetensors::open(output)
-        .map_err(|error| format!("output could not be reopened: {error}"))?;
+    let output_reader = target.open_output()?;
     let mut report = Nvfp4Report {
         source_path: input.to_owned(),
-        output_path: output.to_owned(),
+        output_path: target.path().to_owned(),
         source_bytes,
-        output_bytes: output_reader.file_size(),
+        output_bytes: OutputTarget::committed_bytes(&written)?,
         quantized_tensors: 0,
         preserved_tensors: 0,
         max_mse: 0.0,
@@ -157,7 +186,7 @@ fn print_decisions(decisions: &[Nvfp4Decision]) {
 
 fn validate_output(
     source: &impl TensorSource,
-    output: &MappedSafetensors,
+    output: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
     summaries: &[TensorSummary],
     report: &mut Nvfp4Report,
@@ -167,8 +196,9 @@ fn validate_output(
         .iter()
         .map(|tensor| tensor.name.as_str())
         .collect();
-    let mut actual_names: Vec<&str> = output
-        .tensors()
+    let output_summaries = output.tensor_summaries();
+    let mut actual_names: Vec<&str> = output_summaries
+        .iter()
         .map(|tensor| tensor.name.as_str())
         .collect();
     expected_names.sort_unstable();
@@ -185,13 +215,13 @@ fn validate_output(
     for tensor in &plan.tensors {
         match tensor.role {
             Nvfp4OutputRole::Preserved => {
-                let output_bytes = output
-                    .tensor_bytes(&tensor.name)
-                    .map_err(|error| error.to_string())?;
-                let unchanged = source
-                    .with_tensor_bytes(&tensor.source_name, |source_bytes| {
-                        source_bytes == output_bytes
+                let unchanged = output
+                    .with_tensor_bytes(&tensor.name, |output_bytes| {
+                        source.with_tensor_bytes(&tensor.source_name, |source_bytes| {
+                            source_bytes == output_bytes
+                        })
                     })
+                    .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?;
                 if !unchanged {
                     return Err(format!(
@@ -215,34 +245,26 @@ fn validate_output(
                             tensor.source_name
                         )
                     })?;
-                let packed = output
-                    .tensor_bytes(&tensor.name)
-                    .map_err(|error| error.to_string())?;
-                let block_scales = output
-                    .tensor_bytes(&format!("{}.block_scale", tensor.source_name))
-                    .map_err(|error| error.to_string())?;
-                let global_bytes = output
-                    .tensor_bytes(&format!("{}.global_scale", tensor.source_name))
-                    .map_err(|error| error.to_string())?;
-                let global_scale = f32::from_le_bytes(global_bytes.try_into().map_err(|_| {
-                    format!(
-                        "global scale for {:?} has {} bytes instead of 4",
-                        tensor.source_name,
-                        global_bytes.len()
-                    )
-                })?);
-                let reconstructed = dequantize_iter(packed, block_scales, global_scale, elements)
-                    .map_err(|error| {
-                    format!("could not dequantize {:?}: {error}", tensor.source_name)
-                })?;
-                let metrics = source
-                    .with_tensor(&tensor.source_name, |view| {
-                        reconstruction_metrics_streaming(view.values(), reconstructed)
+                let block_name = format!("{}.block_scale", tensor.source_name);
+                let global_name = format!("{}.global_scale", tensor.source_name);
+                let metrics = output
+                    .with_tensor_bytes(&tensor.name, |packed| {
+                        output.with_tensor_bytes(&block_name, |block_scales| {
+                            output.with_tensor_bytes(&global_name, |global_bytes| {
+                                check_quantized_nvfp4(
+                                    source,
+                                    &tensor.source_name,
+                                    packed,
+                                    block_scales,
+                                    global_bytes,
+                                    elements,
+                                )
+                            })
+                        })
                     })
                     .map_err(|error| error.to_string())?
-                    .map_err(|error| {
-                        format!("could not validate {:?}: {error}", tensor.source_name)
-                    })?;
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())??;
                 report.quantized_tensors += 1;
                 report.max_mse = report.max_mse.max(metrics.mse);
                 report.max_mae = report.max_mae.max(metrics.mae);
@@ -259,6 +281,30 @@ fn validate_output(
         }
     }
     Ok(())
+}
+
+fn check_quantized_nvfp4(
+    source: &impl TensorSource,
+    source_name: &str,
+    packed: &[u8],
+    block_scales: &[u8],
+    global_bytes: &[u8],
+    elements: usize,
+) -> Result<modelq::diagnostics::ReconstructionMetrics, String> {
+    let global_scale = f32::from_le_bytes(global_bytes.try_into().map_err(|_| {
+        format!(
+            "global scale for {source_name:?} has {} bytes instead of 4",
+            global_bytes.len()
+        )
+    })?);
+    let reconstructed = dequantize_iter(packed, block_scales, global_scale, elements)
+        .map_err(|error| format!("could not dequantize {source_name:?}: {error}"))?;
+    source
+        .with_tensor(source_name, |view| {
+            reconstruction_metrics_streaming(view.values(), reconstructed)
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("could not validate {source_name:?}: {error}"))
 }
 
 fn print_report(report: &Nvfp4Report) {
