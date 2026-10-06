@@ -1,3 +1,5 @@
+mod nvfp4_command;
+
 use std::{collections::BTreeSet, path::PathBuf};
 
 use clap::{Arg, ArgMatches, Command, value_parser};
@@ -7,7 +9,8 @@ use modelq::{
     },
     io::{
         layout::{OutputTensorRole, plan_output_layout},
-        safetensors::{Inspection, MappedSafetensors, TensorSummary, inspect_file},
+        safetensors::{Inspection, MappedSafetensors, TensorSource, TensorSummary, inspect_file},
+        sharded::SafetensorsInput,
         writer::write_safetensors,
     },
     quant::{
@@ -23,19 +26,48 @@ fn main() {
             let Some(path) = matches.get_one::<PathBuf>("model") else {
                 print_error(&"inspect requires a model path");
             };
-            inspect_file(path)
-                .map(|inspection| print_inspection(&inspection))
-                .map_err(|error| error.to_string())
+            run_inspect(path)
         }
-        Some(("quantize", matches)) => {
-            run_quantize(matches).map(|report| print_quantize_report(&report))
-        }
+        Some(("quantize", matches)) => run_quantize_command(matches),
         _ => Ok(()),
     };
 
     if let Err(error) = result {
         print_error(&error);
     }
+}
+
+fn run_inspect(path: &std::path::Path) -> Result<(), String> {
+    if path.is_file() && !path.to_string_lossy().ends_with(".index.json") {
+        return inspect_file(path)
+            .map(|inspection| print_inspection(&inspection))
+            .map_err(|error| error.to_string());
+    }
+    let input = SafetensorsInput::open(path).map_err(|error| error.to_string())?;
+    let shards = input.source_paths();
+    let total_bytes = input
+        .tensors()
+        .iter()
+        .map(|tensor| tensor.summary.byte_len)
+        .sum::<u64>();
+    println!("Format: SafeTensors (sharded)");
+    println!("Shards: {}", shards.len());
+    println!("Payload bytes: {total_bytes}");
+    println!("Tensors: {}", input.tensors().len());
+    for tensor in input.tensors() {
+        let shard = tensor
+            .shard
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        println!(
+            "  {} | dtype={} | shape={:?} | bytes={} | shard={shard}",
+            tensor.summary.name,
+            tensor.summary.dtype,
+            tensor.summary.shape,
+            tensor.summary.byte_len
+        );
+    }
+    Ok(())
 }
 
 fn print_error(error: &dyn std::fmt::Display) -> ! {
@@ -61,7 +93,7 @@ fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("quantize")
-                .about("Quantize a SafeTensors checkpoint with the CPU INT8 path")
+                .about("Quantize a SafeTensors checkpoint (CPU, INT8 or ModelQ-native NVFP4)")
                 .arg(
                     Arg::new("model")
                         .value_name("MODEL")
@@ -88,6 +120,20 @@ fn build_cli() -> Command {
                         .value_name("PATH")
                         .value_parser(value_parser!(PathBuf))
                         .required(true),
+                )
+                .arg(
+                    Arg::new("exclude")
+                        .long("exclude")
+                        .value_name("SUBSTRING")
+                        .value_parser(value_parser!(String))
+                        .action(clap::ArgAction::Append)
+                        .help("nvfp4 only: also preserve tensors whose name contains SUBSTRING"),
+                )
+                .arg(
+                    Arg::new("no-default-excludes")
+                        .long("no-default-excludes")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("nvfp4 only: quantize embedding and lm_head tensors too"),
                 ),
         )
 }
@@ -122,6 +168,64 @@ struct ValidationReport {
     lowest_sqnr_db: Option<f64>,
 }
 
+fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
+    let format = matches
+        .get_one::<String>("format")
+        .ok_or_else(|| "quantize requires --format <int8|nvfp4>".to_owned())?;
+    let has_nvfp4_options =
+        matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
+    match format.as_str() {
+        "int8" => {
+            if has_nvfp4_options {
+                return Err(
+                    "--exclude and --no-default-excludes apply only to --format nvfp4".to_owned(),
+                );
+            }
+            run_quantize(matches).map(|report| print_quantize_report(&report))
+        }
+        "nvfp4" => {
+            let (input, output) = quantize_paths(matches)?;
+            require_cpu(matches)?;
+            let options = nvfp4_command::Nvfp4Options {
+                exclude: matches
+                    .get_many::<String>("exclude")
+                    .map(|values| values.cloned().collect())
+                    .unwrap_or_default(),
+                default_excludes: !matches.get_flag("no-default-excludes"),
+            };
+            nvfp4_command::run(&input, &output, &options)
+        }
+        other => Err(format!(
+            "unsupported format {other:?}; supported formats are int8 and nvfp4"
+        )),
+    }
+}
+
+fn quantize_paths(matches: &ArgMatches) -> Result<(PathBuf, PathBuf), String> {
+    let input = matches
+        .get_one::<PathBuf>("model")
+        .ok_or_else(|| "quantize requires a model path".to_owned())?
+        .clone();
+    let output = matches
+        .get_one::<PathBuf>("output")
+        .ok_or_else(|| "quantize requires --output <PATH>".to_owned())?
+        .clone();
+    Ok((input, output))
+}
+
+fn require_cpu(matches: &ArgMatches) -> Result<(), String> {
+    let device = matches
+        .get_one::<String>("device")
+        .map(String::as_str)
+        .unwrap_or("cpu");
+    if device != "cpu" {
+        return Err(format!(
+            "unsupported device {device:?}; only cpu is supported"
+        ));
+    }
+    Ok(())
+}
+
 fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
     let input = matches
         .get_one::<PathBuf>("model")
@@ -150,24 +254,32 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
     }
 
     println!("Inspecting source: {}", input.display());
-    let source = MappedSafetensors::open(&input).map_err(|error| error.to_string())?;
-    let inspection = source.inspection();
-    let candidates = inspection
-        .tensors
+    let source = SafetensorsInput::open(&input).map_err(|error| error.to_string())?;
+    let summaries = source.tensor_summaries();
+    let source_bytes = source
+        .source_paths()
+        .iter()
+        .map(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| format!("could not stat {}: {error}", path.display()))
+        })
+        .sum::<Result<u64, String>>()?;
+    let candidates = summaries
         .iter()
         .map(candidate_for)
         .collect::<Result<Vec<_>, _>>()?;
     let decisions = QuantizationPolicy::default().decide_all(candidates);
-    let plan = plan_output_layout(&inspection.tensors, &decisions)
+    let plan = plan_output_layout(&summaries, &decisions)
         .map_err(|error| format!("could not plan output: {error}"))?;
 
     println!(
         "Planning: {} source tensors, {} output tensors, {} data bytes",
-        inspection.tensors.len(),
+        summaries.len(),
         plan.tensors.len(),
         plan.total_data_bytes
     );
-    print_progress(&source, &inspection.tensors, &decisions)?;
+    print_progress(&source, &summaries, &decisions)?;
 
     println!("Writing output: {}", output.display());
     write_safetensors(&source, &plan, &decisions, &output)
@@ -181,7 +293,7 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
     Ok(QuantizeReport {
         source_path: input,
         output_path: output,
-        source_bytes: inspection.file_size,
+        source_bytes,
         output_bytes: output_reader.file_size(),
         validation,
     })
@@ -203,7 +315,7 @@ fn candidate_for(summary: &TensorSummary) -> Result<TensorCandidate, String> {
 }
 
 fn print_progress(
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     summaries: &[TensorSummary],
     decisions: &[TensorDecision],
 ) -> Result<(), String> {
@@ -227,16 +339,17 @@ fn print_progress(
                 decision.reason
             ),
             PolicyAction::Quantize => {
-                let view = source
-                    .tensor(&summary.name)
-                    .map_err(|error| error.to_string())?;
-                let (scale, diagnostics) = int8_tensor_diagnostics_replay(
-                    || view.values(),
-                    DEFAULT_CHUNK_ELEMENTS,
-                    summary.byte_len,
-                    4,
-                )
-                .map_err(|error| format!("could not diagnose {:?}: {error}", summary.name))?;
+                let (scale, diagnostics) = source
+                    .with_tensor(&summary.name, |view| {
+                        int8_tensor_diagnostics_replay(
+                            || view.values(),
+                            DEFAULT_CHUNK_ELEMENTS,
+                            summary.byte_len,
+                            4,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| format!("could not diagnose {:?}: {error}", summary.name))?;
                 println!(
                     "Progress: {}/{} | {} | quantize | mse={:.3e} | mae={:.3e} | scale={:.6e}",
                     index + 1,
@@ -253,7 +366,7 @@ fn print_progress(
 }
 
 fn validate_output(
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     output: &MappedSafetensors,
     plan: &modelq::io::layout::OutputLayoutPlan,
 ) -> Result<ValidationReport, String> {
@@ -283,13 +396,15 @@ fn validate_output(
     for tensor in &plan.tensors {
         match tensor.role {
             OutputTensorRole::Preserved => {
-                let source_bytes = source
-                    .tensor_bytes(&tensor.source_name)
-                    .map_err(|error| error.to_string())?;
                 let output_bytes = output
                     .tensor_bytes(&tensor.name)
                     .map_err(|error| error.to_string())?;
-                if source_bytes != output_bytes {
+                let unchanged = source
+                    .with_tensor_bytes(&tensor.source_name, |source_bytes| {
+                        source_bytes == output_bytes
+                    })
+                    .map_err(|error| error.to_string())?;
+                if !unchanged {
                     return Err(format!(
                         "preserved tensor {:?} changed during writing",
                         tensor.source_name
@@ -298,9 +413,6 @@ fn validate_output(
                 report.preserved_tensors += 1;
             }
             OutputTensorRole::QuantizedData => {
-                let source_view = source
-                    .tensor(&tensor.source_name)
-                    .map_err(|error| error.to_string())?;
                 let qdata = output
                     .tensor_bytes(&tensor.name)
                     .map_err(|error| error.to_string())?;
@@ -327,14 +439,18 @@ fn validate_output(
                 );
                 validate_dequantization(qdata.iter().copied().map(|value| value as i8), scale)
                     .map_err(|error| format!("could not dequantize {:?}: {error}", tensor.name))?;
-                let metrics = reconstruction_metrics_streaming(
-                    source_view.values(),
-                    qdata
-                        .iter()
-                        .copied()
-                        .map(|value| f32::from(value as i8) * scale),
-                )
-                .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
+                let metrics = source
+                    .with_tensor(&tensor.source_name, |source_view| {
+                        reconstruction_metrics_streaming(
+                            source_view.values(),
+                            qdata
+                                .iter()
+                                .copied()
+                                .map(|value| f32::from(value as i8) * scale),
+                        )
+                    })
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
                 report.quantized_tensors += 1;
                 report.saturated_values +=
                     saturation_count_iter(qdata.iter().copied().map(|value| value as i8));

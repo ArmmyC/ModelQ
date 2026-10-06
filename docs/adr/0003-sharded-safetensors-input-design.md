@@ -1,6 +1,6 @@
 # ADR 0003: Sharded SafeTensors Input Discovery and Reading
 
-- Status: Accepted for design; implementation deferred to a later change
+- Status: Accepted; implemented in Task 29 (`modelq_io::sharded`) and wired into `inspect` and INT8 `quantize` in Task 30
 - Date: 2026-08-21
 - Scope: local SafeTensors checkpoint input
 

@@ -17,7 +17,7 @@ use std::{
 
 use serde_json::{Map, Value};
 
-use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSummary};
+use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSource, TensorSummary};
 use modelq_quant::nvfp4::{self, Nvfp4Error};
 
 const U8_DTYPE: &str = "U8";
@@ -1372,7 +1372,7 @@ impl std::error::Error for Nvfp4WriterError {
 /// synchronized.  This is a library-only container writer: it makes no
 /// runtime or hardware compatibility claim.
 pub fn write_nvfp4_safetensors(
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
     destination: impl AsRef<Path>,
 ) -> Result<(), Nvfp4WriterError> {
@@ -1380,9 +1380,13 @@ pub fn write_nvfp4_safetensors(
     if destination.file_name().is_none() {
         return Err(Nvfp4WriterError::InvalidDestination { path: destination });
     }
-    if paths_refer_to_same_file(source.path(), &destination) {
+    if let Some(conflict) = source
+        .source_paths()
+        .into_iter()
+        .find(|path| paths_refer_to_same_file(path, &destination))
+    {
         return Err(Nvfp4WriterError::SourceDestinationConflict {
-            source: source.path().to_owned(),
+            source: conflict,
             destination,
         });
     }
@@ -1390,14 +1394,14 @@ pub fn write_nvfp4_safetensors(
         return Err(Nvfp4WriterError::DestinationExists { path: destination });
     }
 
-    let inspection = source.inspection();
-    let expected_plan = plan_nvfp4_output(&inspection.tensors, plan.quantized_source_names())
+    let summaries = source.tensor_summaries();
+    let expected_plan = plan_nvfp4_output(&summaries, plan.quantized_source_names())
         .map_err(|source| Nvfp4WriterError::Layout { source })?;
     if expected_plan != *plan {
         return Err(Nvfp4WriterError::PlanMismatch);
     }
 
-    let header = build_header(&inspection.tensors, plan, &destination)?;
+    let header = build_header(&summaries, plan, &destination)?;
     let (temporary_path, mut file) = create_temporary_file(&destination)?;
     let mut temporary = TemporaryOutput::new(temporary_path.clone());
 
@@ -1604,7 +1608,7 @@ fn build_header(
 fn write_data(
     file: &mut File,
     output_path: &Path,
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
 ) -> Result<(), Nvfp4WriterError> {
     let mut cursor = 0_u64;
@@ -1637,25 +1641,52 @@ fn write_data(
 
         match tensor.role {
             Nvfp4OutputRole::Preserved => {
-                let bytes = source
-                    .tensor_bytes(&tensor.source_name)
-                    .map_err(|source| Nvfp4WriterError::Source { source })?;
-                write_payload(file, output_path, tensor, bytes)?;
+                source
+                    .with_tensor_bytes(&tensor.source_name, |bytes| {
+                        write_payload(file, output_path, tensor, bytes)
+                    })
+                    .map_err(|source| Nvfp4WriterError::Source { source })??;
             }
             Nvfp4OutputRole::QuantizedData => {
-                let view = source
-                    .tensor(&tensor.source_name)
-                    .map_err(|source| Nvfp4WriterError::Source { source })?;
-                let values = view.values().collect::<Vec<_>>();
-                let quantized =
-                    nvfp4::quantize_shaped(&values, view.shape()).map_err(|source| {
-                        Nvfp4WriterError::Quantization {
-                            tensor_name: tensor.source_name.clone(),
-                            source,
-                        }
-                    })?;
-                write_payload(file, output_path, tensor, quantized.packed_values())?;
-                quantized_tensors.insert(tensor.source_name.clone(), quantized);
+                let streamed = source
+                    .with_tensor(
+                        &tensor.source_name,
+                        |view| -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
+                            let mut written = 0_u64;
+                            let result = nvfp4::quantize_replay_chunks(
+                                view.shape(),
+                                || view.values(),
+                                nvfp4::DEFAULT_CHUNK_BLOCKS,
+                                |chunk| {
+                                    written = written.saturating_add(
+                                        u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+                                    );
+                                    file.write_all(chunk)
+                                        .map_err(|source| io_error(output_path, source))
+                                },
+                            );
+                            let streamed = match result {
+                                Ok(streamed) => streamed,
+                                Err(nvfp4::Nvfp4StreamError::Quantization(source)) => {
+                                    return Err(Nvfp4WriterError::Quantization {
+                                        tensor_name: tensor.source_name.clone(),
+                                        source,
+                                    });
+                                }
+                                Err(nvfp4::Nvfp4StreamError::Callback(error)) => return Err(error),
+                            };
+                            if written != tensor.byte_len {
+                                return Err(Nvfp4WriterError::DataLengthMismatch {
+                                    name: tensor.name.clone(),
+                                    expected: tensor.byte_len,
+                                    actual: written,
+                                });
+                            }
+                            Ok(streamed)
+                        },
+                    )
+                    .map_err(|source| Nvfp4WriterError::Source { source })??;
+                quantized_tensors.insert(tensor.source_name.clone(), streamed);
             }
             Nvfp4OutputRole::BlockScales => {
                 let quantized = quantized_tensors.get(&tensor.source_name).ok_or_else(|| {

@@ -51,6 +51,8 @@ pub enum Nvfp4Error {
     InvalidGlobalScale { scale: f32 },
     /// A reconstructed value is not finite.
     DequantizedValueOverflow { index: usize },
+    /// A streaming chunk size of zero blocks was requested.
+    InvalidChunkSize { chunk_blocks: usize },
 }
 
 impl fmt::Display for Nvfp4Error {
@@ -107,6 +109,10 @@ impl fmt::Display for Nvfp4Error {
             Self::DequantizedValueOverflow { index } => write!(
                 formatter,
                 "NVFP4 dequantized value at index {index} is not finite"
+            ),
+            Self::InvalidChunkSize { chunk_blocks } => write!(
+                formatter,
+                "NVFP4 streaming chunk size must be positive, got {chunk_blocks} blocks"
             ),
         }
     }
@@ -217,40 +223,18 @@ impl QuantizedTensor {
 /// layout.
 pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
     let global_amax = max_abs(values)?;
-    let global_scale = if global_amax == 0.0 {
-        1.0
-    } else {
-        (global_amax / SCALE_PRODUCT).max(MIN_POSITIVE_F32)
-    };
+    let global_scale = global_scale_for(global_amax);
 
     let mut unpacked = Vec::with_capacity(values.len());
     let mut block_scales = Vec::with_capacity(block_count(values.len()));
     for (block, chunk) in values.chunks(BLOCK_SIZE).enumerate() {
-        let block_amax = chunk
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f32, f32::max);
-        if block_amax == 0.0 {
-            block_scales.push(0);
-            unpacked.extend(std::iter::repeat_n(0, chunk.len()));
-            continue;
-        }
-
-        let scale_input = (block_amax / global_amax) * FP8_MAX;
-        let mut scale_bits = fp8_e4m3::encode(scale_input);
-        if scale_bits == 0 {
-            scale_bits = MIN_POSITIVE_E4M3_BITS;
-        }
-        let decoded_block_scale = fp8_e4m3::decode(scale_bits);
-        block_scales.push(scale_bits);
-
-        for (offset, &value) in chunk.iter().enumerate() {
-            let index = block * BLOCK_SIZE + offset;
-            let scaled = ((value / global_amax) * SCALE_PRODUCT) / decoded_block_scale;
-            let code = fp4_e2m1::encode(scaled)
-                .map_err(|_| Nvfp4Error::NonFiniteInput { index, value })?;
-            unpacked.push(code);
-        }
+        encode_block(
+            chunk,
+            block * BLOCK_SIZE,
+            global_amax,
+            &mut block_scales,
+            &mut unpacked,
+        )?;
     }
 
     let packed = pack(&unpacked)?;
@@ -269,6 +253,18 @@ pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
 /// [`BLOCK_SIZE`].  The returned representation remains flat; callers retain
 /// the original `shape` for their container or tensor metadata.
 pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTensor, Nvfp4Error> {
+    let expected = checked_shape_elements(shape)?;
+    if expected != values.len() {
+        return Err(Nvfp4Error::ShapeLengthMismatch {
+            expected,
+            actual: values.len(),
+        });
+    }
+
+    quantize(values)
+}
+
+fn checked_shape_elements(shape: &[usize]) -> Result<usize, Nvfp4Error> {
     if shape.is_empty()
         || shape.contains(&0)
         || !shape
@@ -279,21 +275,186 @@ pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTenso
             shape: shape.to_vec(),
         });
     }
-
-    let expected = shape
+    shape
         .iter()
         .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
         .ok_or_else(|| Nvfp4Error::ShapeElementCountOverflow {
             shape: shape.to_vec(),
-        })?;
-    if expected != values.len() {
-        return Err(Nvfp4Error::ShapeLengthMismatch {
-            expected,
-            actual: values.len(),
-        });
+        })
+}
+
+fn global_scale_for(global_amax: f32) -> f32 {
+    if global_amax == 0.0 {
+        1.0
+    } else {
+        (global_amax / SCALE_PRODUCT).max(MIN_POSITIVE_F32)
+    }
+}
+
+/// Encodes one block, appending its scale to `block_scales` and one E2M1 code
+/// per value to `codes`.  `start_index` is the flattened index of `chunk[0]`
+/// and is used only for error reporting.  The reference and streaming paths
+/// share this encoder so their output cannot diverge.
+fn encode_block(
+    chunk: &[f32],
+    start_index: usize,
+    global_amax: f32,
+    block_scales: &mut Vec<u8>,
+    codes: &mut Vec<u8>,
+) -> Result<(), Nvfp4Error> {
+    let block_amax = chunk
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f32, f32::max);
+    if block_amax == 0.0 {
+        block_scales.push(0);
+        codes.extend(std::iter::repeat_n(0, chunk.len()));
+        return Ok(());
     }
 
-    quantize(values)
+    let scale_input = (block_amax / global_amax) * FP8_MAX;
+    let mut scale_bits = fp8_e4m3::encode(scale_input);
+    if scale_bits == 0 {
+        scale_bits = MIN_POSITIVE_E4M3_BITS;
+    }
+    let decoded_block_scale = fp8_e4m3::decode(scale_bits);
+    block_scales.push(scale_bits);
+
+    for (offset, &value) in chunk.iter().enumerate() {
+        let scaled = ((value / global_amax) * SCALE_PRODUCT) / decoded_block_scale;
+        let code = fp4_e2m1::encode(scaled).map_err(|_| Nvfp4Error::NonFiniteInput {
+            index: start_index + offset,
+            value,
+        })?;
+        codes.push(code);
+    }
+    Ok(())
+}
+
+/// Default number of blocks quantized per emitted chunk (4096 blocks =
+/// 65,536 values, 32 KiB packed).
+pub const DEFAULT_CHUNK_BLOCKS: usize = 4096;
+
+/// Tensor-level results of a bounded streaming quantization.  The packed
+/// payload has already been delivered to the caller's callback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamedQuantization {
+    block_scales: Vec<u8>,
+    global_scale: f32,
+    elements: usize,
+}
+
+impl StreamedQuantization {
+    /// E4M3 block scale bit patterns, one per 16 values.
+    pub fn block_scales(&self) -> &[u8] {
+        &self.block_scales
+    }
+
+    /// Tensor-wide F32 decode scale.
+    pub const fn global_scale(&self) -> f32 {
+        self.global_scale
+    }
+
+    /// Number of source elements quantized.
+    pub const fn elements(&self) -> usize {
+        self.elements
+    }
+}
+
+/// Error returned by [`quantize_replay_chunks`].
+#[derive(Debug)]
+pub enum Nvfp4StreamError<E> {
+    /// The source values, shape, or chunk size were invalid.
+    Quantization(Nvfp4Error),
+    /// The caller's chunk callback failed.
+    Callback(E),
+}
+
+/// Quantizes a shaped row-major tensor from a replayable value source in
+/// bounded memory.
+///
+/// `values` is called twice: once to find the tensor-wide amax and once to
+/// produce data.  Packed bytes are passed to `emit` in order, in chunks of up
+/// to `chunk_blocks` blocks; the callback must consume each borrowed chunk
+/// before returning.  Only one chunk of source values and codes is held, plus
+/// the returned block scales (one byte per 16 values).  The emitted bytes
+/// concatenate to exactly [`quantize_shaped`]'s payload, and the scales and
+/// global scale are identical to it.
+pub fn quantize_replay_chunks<F, I, C, E>(
+    shape: &[usize],
+    mut values: F,
+    chunk_blocks: usize,
+    mut emit: C,
+) -> Result<StreamedQuantization, Nvfp4StreamError<E>>
+where
+    F: FnMut() -> I,
+    I: IntoIterator<Item = f32>,
+    C: FnMut(&[u8]) -> Result<(), E>,
+{
+    let fail = Nvfp4StreamError::Quantization;
+    let expected = checked_shape_elements(shape).map_err(fail)?;
+    if chunk_blocks == 0 {
+        return Err(fail(Nvfp4Error::InvalidChunkSize { chunk_blocks }));
+    }
+
+    let mut global_amax = 0.0_f32;
+    let mut seen = 0_usize;
+    for value in values() {
+        if !value.is_finite() {
+            return Err(fail(Nvfp4Error::NonFiniteInput { index: seen, value }));
+        }
+        global_amax = global_amax.max(value.abs());
+        seen += 1;
+    }
+    if seen != expected {
+        return Err(fail(Nvfp4Error::ShapeLengthMismatch {
+            expected,
+            actual: seen,
+        }));
+    }
+    let global_scale = global_scale_for(global_amax);
+
+    let chunk_values = chunk_blocks.saturating_mul(BLOCK_SIZE);
+    let mut buffer: Vec<f32> = Vec::with_capacity(chunk_values.min(expected));
+    let mut codes: Vec<u8> = Vec::with_capacity(buffer.capacity());
+    let mut block_scales = Vec::with_capacity(block_count(expected));
+    let mut start = 0_usize;
+    let mut source = values().into_iter();
+    loop {
+        buffer.clear();
+        buffer.extend(source.by_ref().take(chunk_values));
+        if buffer.is_empty() {
+            break;
+        }
+        codes.clear();
+        for (block, chunk) in buffer.chunks(BLOCK_SIZE).enumerate() {
+            encode_block(
+                chunk,
+                start + block * BLOCK_SIZE,
+                global_amax,
+                &mut block_scales,
+                &mut codes,
+            )
+            .map_err(fail)?;
+        }
+        start += buffer.len();
+        // Chunks hold whole blocks, so each starts on a byte boundary and
+        // per-chunk packing concatenates to the whole-tensor packing.
+        let packed = pack(&codes).map_err(fail)?;
+        emit(&packed).map_err(Nvfp4StreamError::Callback)?;
+    }
+    if start != expected {
+        return Err(fail(Nvfp4Error::ShapeLengthMismatch {
+            expected,
+            actual: start,
+        }));
+    }
+
+    Ok(StreamedQuantization {
+        block_scales,
+        global_scale,
+        elements: expected,
+    })
 }
 
 /// Packs E2M1 bit patterns two per byte, with the first value in the low
@@ -367,6 +528,9 @@ pub fn dequantize(
 }
 
 /// Validates packed values, block scales, and the tensor-wide decode scale.
+///
+/// Validation reads the packed bytes in place and allocates nothing, so it is
+/// safe to use on tensors too large to unpack.
 pub fn validate_parts(
     packed: &[u8],
     block_scales: &[u8],
@@ -396,21 +560,47 @@ pub fn validate_parts(
         });
     }
 
-    let values = unpack(packed, elements)?;
     for (block, &scale_bits) in block_scales.iter().enumerate() {
         validate_block_scale(scale_bits, block)?;
         if scale_bits == 0 {
             let start = block.saturating_mul(BLOCK_SIZE);
             let end = elements.min(start.saturating_add(BLOCK_SIZE));
-            if let Some(offset) = values[start..end].iter().position(|&code| code & 0x07 != 0) {
-                return Err(Nvfp4Error::ZeroScaleWithNonzeroValue {
-                    block,
-                    index: start + offset,
-                });
+            if let Some(index) = (start..end).find(|&index| code_at(packed, index) & 0x07 != 0) {
+                return Err(Nvfp4Error::ZeroScaleWithNonzeroValue { block, index });
             }
         }
     }
     Ok(())
+}
+
+/// Lazily reconstructs F32 values after validating the parts.
+///
+/// Yields exactly the values [`dequantize`] returns, one at a time, without
+/// materializing the tensor.  Use it to compare large tensors in bounded
+/// memory.  Values are not checked for overflow here because a validated
+/// decode scale and block scales cannot exceed the finite F32 range for data
+/// produced by [`quantize`]; use [`dequantize`] when untrusted parts must be
+/// proven finite.
+pub fn dequantize_iter<'a>(
+    packed: &'a [u8],
+    block_scales: &'a [u8],
+    global_scale: f32,
+    elements: usize,
+) -> Result<impl ExactSizeIterator<Item = f32> + 'a, Nvfp4Error> {
+    validate_parts(packed, block_scales, global_scale, elements)?;
+    Ok((0..elements).map(move |index| {
+        let block_scale = fp8_e4m3::decode(block_scales[index / BLOCK_SIZE]);
+        fp4_e2m1::decode(code_at(packed, index)) * block_scale * global_scale
+    }))
+}
+
+fn code_at(packed: &[u8], index: usize) -> u8 {
+    let byte = packed[index / VALUES_PER_BYTE];
+    if index % VALUES_PER_BYTE == 0 {
+        byte & 0x0f
+    } else {
+        byte >> 4
+    }
 }
 
 /// Returns the packed byte count for an element count.
@@ -456,8 +646,9 @@ fn validate_block_scale(bits: u8, block: usize) -> Result<(), Nvfp4Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_SIZE, FP4_MAX, FP8_MAX, Nvfp4Error, block_count, dequantize, pack, packed_len,
-        quantize, quantize_shaped, unpack, validate_parts,
+        BLOCK_SIZE, FP4_MAX, FP8_MAX, Nvfp4Error, Nvfp4StreamError, block_count, dequantize,
+        dequantize_iter, pack, packed_len, quantize, quantize_replay_chunks, quantize_shaped,
+        unpack, validate_parts,
     };
 
     #[test]
@@ -638,5 +829,188 @@ mod tests {
         let quantized = quantize(&source).expect("finite subnormal values are valid");
         assert_eq!(quantized.block_scales()[0], 0x01);
         assert!(quantized.dequantize().is_ok());
+    }
+
+    /// Deterministic values spanning many magnitudes, signs, and exact zeros.
+    fn spread_values(count: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        (0..count)
+            .map(|index| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let unit = ((state >> 40) as f32 / (1_u64 << 24) as f32) * 2.0 - 1.0;
+                let exponent = ((state >> 8) % 24) as i32 - 12;
+                match index % 17 {
+                    0 => 0.0,
+                    _ => unit * 2.0_f32.powi(exponent),
+                }
+            })
+            .collect()
+    }
+
+    fn streamed(
+        values: &[f32],
+        shape: &[usize],
+        chunk_blocks: usize,
+    ) -> (Vec<u8>, super::StreamedQuantization) {
+        let mut packed = Vec::new();
+        let result = quantize_replay_chunks(
+            shape,
+            || values.iter().copied(),
+            chunk_blocks,
+            |chunk| -> Result<(), ()> {
+                packed.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .expect("streaming quantization succeeds");
+        (packed, result)
+    }
+
+    fn assert_streaming_matches_reference(values: &[f32], shape: &[usize]) {
+        let reference = quantize_shaped(values, shape).expect("reference succeeds");
+        // 1 and 3 split the data awkwardly; the large value is a single chunk.
+        for chunk_blocks in [1, 3, 7, 4096] {
+            let (packed, result) = streamed(values, shape, chunk_blocks);
+            assert_eq!(packed, reference.packed(), "chunk_blocks={chunk_blocks}");
+            assert_eq!(result.block_scales(), reference.block_scales());
+            assert_eq!(
+                result.global_scale().to_bits(),
+                reference.global_scale().to_bits()
+            );
+            assert_eq!(result.elements(), values.len());
+        }
+    }
+
+    #[test]
+    fn streaming_matches_reference_bit_for_bit() {
+        for (rows, columns, seed) in [(1, 16, 1), (5, 48, 2), (64, 64, 3), (3, 4096 + 16, 4)] {
+            let values = spread_values(rows * columns, seed);
+            assert_streaming_matches_reference(&values, &[rows, columns]);
+        }
+    }
+
+    #[test]
+    fn streaming_matches_reference_for_edge_inputs() {
+        assert_streaming_matches_reference(&[0.0; 64], &[4, 16]);
+
+        let mut outlier = vec![0.001_f32; 128];
+        outlier[77] = 6.0e6;
+        assert_streaming_matches_reference(&outlier, &[8, 16]);
+
+        let mut tiny = vec![0.0_f32; 32];
+        tiny[0] = f32::from_bits(1);
+        tiny[16] = 1.0;
+        assert_streaming_matches_reference(&tiny, &[2, 16]);
+
+        let negative: Vec<f32> = (0..48).map(|index| -(index as f32) - 0.5).collect();
+        assert_streaming_matches_reference(&negative, &[3, 16]);
+    }
+
+    #[test]
+    fn streaming_reports_the_first_non_finite_index() {
+        let mut values = vec![1.0_f32; 64];
+        values[40] = f32::NAN;
+        values[50] = f32::INFINITY;
+        let error =
+            quantize_replay_chunks(&[4, 16], || values.iter().copied(), 2, |_| Ok::<(), ()>(()))
+                .expect_err("non-finite input is rejected");
+        assert!(matches!(
+            error,
+            Nvfp4StreamError::Quantization(Nvfp4Error::NonFiniteInput { index: 40, .. })
+        ));
+    }
+
+    #[test]
+    fn streaming_validates_shape_chunk_size_and_length() {
+        let values = vec![1.0_f32; 32];
+        let run = |shape: &[usize], chunk_blocks: usize, source: &[f32]| {
+            quantize_replay_chunks(
+                shape,
+                || source.iter().copied(),
+                chunk_blocks,
+                |_| Ok::<(), ()>(()),
+            )
+        };
+        assert!(matches!(
+            run(&[2, 15], 1, &values),
+            Err(Nvfp4StreamError::Quantization(
+                Nvfp4Error::InvalidShape { .. }
+            ))
+        ));
+        assert!(matches!(
+            run(&[2, 16], 0, &values),
+            Err(Nvfp4StreamError::Quantization(
+                Nvfp4Error::InvalidChunkSize { chunk_blocks: 0 }
+            ))
+        ));
+        assert!(matches!(
+            run(&[3, 16], 1, &values),
+            Err(Nvfp4StreamError::Quantization(
+                Nvfp4Error::ShapeLengthMismatch {
+                    expected: 48,
+                    actual: 32
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn streaming_propagates_callback_errors_and_bounds_chunks() {
+        let values = spread_values(16 * 10, 9);
+        let mut sizes = Vec::new();
+        quantize_replay_chunks(
+            &[10, 16],
+            || values.iter().copied(),
+            4,
+            |chunk| {
+                sizes.push(chunk.len());
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("succeeds");
+        // 10 blocks in chunks of 4 blocks (32 packed bytes): 4, 4, 2 blocks.
+        assert_eq!(sizes, [32, 32, 16]);
+
+        let error = quantize_replay_chunks(
+            &[10, 16],
+            || values.iter().copied(),
+            4,
+            |_| Err("sink failed"),
+        )
+        .expect_err("callback failure is surfaced");
+        assert!(matches!(error, Nvfp4StreamError::Callback("sink failed")));
+    }
+
+    #[test]
+    fn dequantize_iter_matches_dequantize_and_rejects_bad_parts() {
+        let values = spread_values(16 * 12, 21);
+        let quantized = quantize_shaped(&values, &[12, 16]).expect("quantizes");
+        let eager = quantized.dequantize().expect("dequantizes");
+        let lazy: Vec<f32> = dequantize_iter(
+            quantized.packed(),
+            quantized.block_scales(),
+            quantized.global_scale(),
+            values.len(),
+        )
+        .expect("parts validate")
+        .collect();
+        assert_eq!(
+            eager
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            lazy.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
+
+        assert!(matches!(
+            dequantize_iter(quantized.packed(), quantized.block_scales(), 0.0, 192),
+            Err(Nvfp4Error::InvalidGlobalScale { .. })
+        ));
+        assert!(matches!(
+            dequantize_iter(&[0xff], &[0x38], 1.0, 16),
+            Err(Nvfp4Error::PackedLengthMismatch { .. })
+        ));
     }
 }

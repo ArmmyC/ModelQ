@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::{
     layout::{LayoutError, OutputLayoutPlan, OutputTensorRole, plan_output_layout},
-    safetensors::{MappedSafetensors, SafetensorsError, TensorSummary},
+    safetensors::{SafetensorsError, TensorSource, TensorSummary},
     transformer_engine::{
         TRANSFORMER_ENGINE_NVFP4_BLOCK_SIZE, TRANSFORMER_ENGINE_NVFP4_PROFILE,
         TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT,
@@ -208,7 +208,7 @@ impl std::error::Error for WriterError {
 /// been flushed and synchronized. Any failure therefore leaves both the
 /// source and the requested destination unchanged.
 pub fn write_safetensors(
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     plan: &OutputLayoutPlan,
     decisions: &[TensorDecision],
     destination: impl AsRef<Path>,
@@ -217,9 +217,13 @@ pub fn write_safetensors(
     if destination.file_name().is_none() {
         return Err(WriterError::InvalidDestination { path: destination });
     }
-    if paths_refer_to_same_file(source.path(), &destination) {
+    if let Some(conflict) = source
+        .source_paths()
+        .into_iter()
+        .find(|path| paths_refer_to_same_file(path, &destination))
+    {
         return Err(WriterError::SourceDestinationConflict {
-            source: source.path().to_owned(),
+            source: conflict,
             destination,
         });
     }
@@ -227,14 +231,14 @@ pub fn write_safetensors(
         return Err(WriterError::DestinationExists { path: destination });
     }
 
-    let inspection = source.inspection();
-    let expected_plan = plan_output_layout(&inspection.tensors, decisions)
+    let summaries = source.tensor_summaries();
+    let expected_plan = plan_output_layout(&summaries, decisions)
         .map_err(|source| WriterError::Layout { source })?;
     if expected_plan != *plan {
         return Err(WriterError::PlanMismatch);
     }
 
-    let header = build_header(&inspection.tensors, decisions, plan)?;
+    let header = build_header(&summaries, decisions, plan)?;
     let (temporary_path, mut file) = create_temporary_file(&destination)?;
     let mut temporary = TemporaryOutput::new(temporary_path.clone());
 
@@ -694,7 +698,7 @@ fn build_header(
 fn write_data(
     file: &mut File,
     output_path: &Path,
-    source: &MappedSafetensors,
+    source: &impl TensorSource,
     plan: &OutputLayoutPlan,
 ) -> Result<(), WriterError> {
     let mut cursor = 0_u64;
@@ -727,54 +731,57 @@ fn write_data(
 
         match tensor.role {
             OutputTensorRole::Preserved => {
-                let bytes = source
-                    .tensor_bytes(&tensor.source_name)
-                    .map_err(|source| WriterError::Source { source })?;
-                write_payload(file, output_path, tensor, bytes)?;
+                source
+                    .with_tensor_bytes(&tensor.source_name, |bytes| {
+                        write_payload(file, output_path, tensor, bytes)
+                    })
+                    .map_err(|source| WriterError::Source { source })??;
             }
             OutputTensorRole::QuantizedData => {
-                let view = source
-                    .tensor(&tensor.source_name)
-                    .map_err(|source| WriterError::Source { source })?;
-                let mut actual = 0_u64;
-                let stream_result = quantize_replay_chunks(
-                    || view.values(),
-                    DEFAULT_CHUNK_ELEMENTS,
-                    |chunk| {
-                        let chunk_bytes = u64::try_from(chunk.len()).map_err(|_| {
-                            WriterError::DataLengthMismatch {
+                let scale = source
+                    .with_tensor(&tensor.source_name, |view| -> Result<f32, WriterError> {
+                        let mut actual = 0_u64;
+                        let stream_result = quantize_replay_chunks(
+                            || view.values(),
+                            DEFAULT_CHUNK_ELEMENTS,
+                            |chunk| {
+                                let chunk_bytes = u64::try_from(chunk.len()).map_err(|_| {
+                                    WriterError::DataLengthMismatch {
+                                        name: tensor.name.clone(),
+                                        expected: tensor.byte_len,
+                                        actual: u64::MAX,
+                                    }
+                                })?;
+                                actual = actual.checked_add(chunk_bytes).ok_or_else(|| {
+                                    WriterError::DataLengthMismatch {
+                                        name: tensor.name.clone(),
+                                        expected: tensor.byte_len,
+                                        actual: u64::MAX,
+                                    }
+                                })?;
+                                write_i8_values(file, output_path, chunk)
+                            },
+                        );
+                        let scale = match stream_result {
+                            Ok(scale) => scale,
+                            Err(QuantizationStreamError::Quantization(source)) => {
+                                return Err(WriterError::Quantization {
+                                    tensor_name: tensor.source_name.clone(),
+                                    source,
+                                });
+                            }
+                            Err(QuantizationStreamError::Callback(error)) => return Err(error),
+                        };
+                        if actual != tensor.byte_len {
+                            return Err(WriterError::DataLengthMismatch {
                                 name: tensor.name.clone(),
                                 expected: tensor.byte_len,
-                                actual: u64::MAX,
-                            }
-                        })?;
-                        actual = actual.checked_add(chunk_bytes).ok_or_else(|| {
-                            WriterError::DataLengthMismatch {
-                                name: tensor.name.clone(),
-                                expected: tensor.byte_len,
-                                actual: u64::MAX,
-                            }
-                        })?;
-                        write_i8_values(file, output_path, chunk)
-                    },
-                );
-                let scale = match stream_result {
-                    Ok(scale) => scale,
-                    Err(QuantizationStreamError::Quantization(source)) => {
-                        return Err(WriterError::Quantization {
-                            tensor_name: tensor.source_name.clone(),
-                            source,
-                        });
-                    }
-                    Err(QuantizationStreamError::Callback(error)) => return Err(error),
-                };
-                if actual != tensor.byte_len {
-                    return Err(WriterError::DataLengthMismatch {
-                        name: tensor.name.clone(),
-                        expected: tensor.byte_len,
-                        actual,
-                    });
-                }
+                                actual,
+                            });
+                        }
+                        Ok(scale)
+                    })
+                    .map_err(|source| WriterError::Source { source })??;
                 scales.insert(tensor.source_name.clone(), scale);
             }
             OutputTensorRole::QuantizationScale => {
