@@ -37,3 +37,7 @@ harness = false
 [[bench]]
 name = "nvfp4_parallel"
 harness = false
+
+[[bench]]
+name = "int8_streaming"
+harness = false

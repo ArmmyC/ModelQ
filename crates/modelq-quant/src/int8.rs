@@ -167,6 +167,13 @@ where
         max_abs = max_abs.max(value.abs());
     }
 
+    Ok(scale_from_max_abs(max_abs))
+}
+
+/// Returns the symmetric scale for a finite tensor-wide maximum magnitude.
+///
+/// Exposed so alternate execution backends derive exactly the reference scale.
+pub fn scale_from_max_abs(max_abs: f32) -> f32 {
     let mut scale = if max_abs == 0.0 {
         DEFAULT_ZERO_SCALE
     } else {
@@ -178,7 +185,47 @@ where
     if scale == 0.0 {
         scale = f32::from_bits(1);
     }
-    Ok(scale)
+    scale
+}
+
+/// Returns the largest absolute value in a chunk of finite values.
+///
+/// `first_index` is the tensor-wide index of `values[0]`, used to report the
+/// first non-finite value.  Combine chunk results with `f32::max`.
+pub fn scan_chunk_max_abs(values: &[f32], first_index: usize) -> Result<f32, Int8Error> {
+    let mut max_abs = 0.0_f32;
+    for (offset, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(Int8Error::NonFiniteInput {
+                index: first_index + offset,
+                value,
+            });
+        }
+        max_abs = max_abs.max(value.abs());
+    }
+    Ok(max_abs)
+}
+
+/// Quantizes a run of values into a caller-provided buffer of the same length.
+///
+/// Each element goes through [`quantize_value`], so the result is identical to
+/// the scalar path.  `first_index` is the tensor-wide index of `values[0]`, used
+/// only for error reporting.
+pub fn quantize_chunk_into(
+    values: &[f32],
+    scale: f32,
+    first_index: usize,
+    output: &mut [i8],
+) -> Result<(), Int8Error> {
+    if output.len() != values.len() {
+        return Err(Int8Error::InvalidChunkSize {
+            chunk_size: output.len(),
+        });
+    }
+    for (offset, (slot, &value)) in output.iter_mut().zip(values).enumerate() {
+        *slot = quantize_value(value, scale, first_index + offset)?;
+    }
+    Ok(())
 }
 
 /// Quantizes one value with a previously computed symmetric scale.

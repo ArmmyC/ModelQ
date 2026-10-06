@@ -5,19 +5,14 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use clap::{Arg, ArgMatches, Command, value_parser};
 use modelq::{
-    diagnostics::{
-        int8_tensor_diagnostics_replay, reconstruction_metrics_streaming, saturation_count_iter,
-    },
+    backend::{cpu::ParallelConfig, int8 as parallel_int8},
     io::{
         layout::{OutputTensorRole, plan_output_layout},
         safetensors::{Inspection, TensorSource, TensorSummary, inspect_file},
         sharded::SafetensorsInput,
-        writer::{WriterError, write_safetensors},
+        writer::{Int8Execution, WriterError, write_safetensors_with},
     },
-    quant::{
-        int8::{DEFAULT_CHUNK_ELEMENTS, validate_dequantization},
-        policy::{PolicyAction, QuantizationPolicy, TensorCandidate, TensorDecision},
-    },
+    quant::policy::{PolicyAction, QuantizationPolicy, TensorCandidate, TensorDecision},
 };
 
 fn main() {
@@ -136,7 +131,7 @@ fn build_cli() -> Command {
                         .long("threads")
                         .value_name("N")
                         .value_parser(value_parser!(usize))
-                        .help("nvfp4 only: worker threads (default: all CPUs; 1 = sequential)"),
+                        .help("worker threads (default: all CPUs; 1 = sequential reference path)"),
                 )
                 .arg(
                     Arg::new("exclude")
@@ -189,15 +184,13 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
     let format = matches
         .get_one::<String>("format")
         .ok_or_else(|| "quantize requires --format <int8|nvfp4>".to_owned())?;
-    let has_nvfp4_options = matches.contains_id("exclude")
-        || matches.contains_id("threads")
-        || matches.get_flag("no-default-excludes");
+    let has_nvfp4_options =
+        matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
     match format.as_str() {
         "int8" => {
             if has_nvfp4_options {
                 return Err(
-                    "--exclude, --no-default-excludes and --threads apply only to --format nvfp4"
-                        .to_owned(),
+                    "--exclude and --no-default-excludes apply only to --format nvfp4".to_owned(),
                 );
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
@@ -280,6 +273,13 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
         ));
     }
 
+    let workers = worker_count(matches)?;
+    let config = ParallelConfig::new(workers, parallel_int8::DEFAULT_CHUNK_ELEMENTS);
+    let execution = if workers == 1 {
+        Int8Execution::Sequential
+    } else {
+        Int8Execution::Parallel(config)
+    };
     println!("Inspecting source: {}", input.display());
     let source = SafetensorsInput::open(&input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();
@@ -306,8 +306,16 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
         plan.tensors.len(),
         plan.total_data_bytes
     );
-    print_progress(&source, &summaries, &decisions)?;
+    print_progress(&source, &summaries, &decisions, config)?;
 
+    println!(
+        "Execution: {}",
+        if workers == 1 {
+            "sequential writer".to_owned()
+        } else {
+            format!("parallel, up to {} workers", workers.min(64))
+        }
+    );
     println!("Writing output: {}", target.describe());
     let mut sized: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for tensor in &plan.tensors {
@@ -327,7 +335,7 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
             .collect();
         let subset_plan = plan_output_layout(&subset_summaries, &subset_decisions)
             .map_err(|source| WriterError::Layout { source })?;
-        write_safetensors(subset, &subset_plan, &subset_decisions, path)?;
+        write_safetensors_with(subset, &subset_plan, &subset_decisions, path, execution)?;
         Ok::<_, WriterError>(
             subset_plan
                 .tensors
@@ -339,7 +347,7 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
 
     println!("Validating output by reopening and dequantizing it...");
     let output_reader = target.open_output()?;
-    let validation = validate_output(&source, &output_reader, &plan)?;
+    let validation = validate_output(&source, &output_reader, &plan, config)?;
 
     Ok(QuantizeReport {
         source_path: input,
@@ -369,6 +377,7 @@ fn print_progress(
     source: &impl TensorSource,
     summaries: &[TensorSummary],
     decisions: &[TensorDecision],
+    config: ParallelConfig,
 ) -> Result<(), String> {
     let decisions_by_name = decisions
         .iter()
@@ -392,9 +401,9 @@ fn print_progress(
             PolicyAction::Quantize => {
                 let (scale, diagnostics) = source
                     .with_tensor(&summary.name, |view| {
-                        int8_tensor_diagnostics_replay(
+                        parallel_int8::tensor_diagnostics_replay(
                             || view.values(),
-                            DEFAULT_CHUNK_ELEMENTS,
+                            config,
                             summary.byte_len,
                             4,
                         )
@@ -420,6 +429,7 @@ fn validate_output(
     source: &impl TensorSource,
     output: &impl TensorSource,
     plan: &modelq::io::layout::OutputLayoutPlan,
+    config: ParallelConfig,
 ) -> Result<ValidationReport, String> {
     let expected_names = plan
         .tensors
@@ -475,7 +485,7 @@ fn validate_output(
                 let (metrics, saturated) = output
                     .with_tensor_bytes(&tensor.name, |qdata| {
                         output.with_tensor_bytes(&scale_name, |scale_bytes| {
-                            check_quantized_int8(source, tensor, qdata, scale_bytes)
+                            check_quantized_int8(source, tensor, qdata, scale_bytes, config)
                         })
                     })
                     .map_err(|error| error.to_string())?
@@ -505,6 +515,7 @@ fn check_quantized_int8(
     tensor: &modelq::io::layout::OutputTensorPlan,
     qdata: &[u8],
     scale_bytes: &[u8],
+    config: ParallelConfig,
 ) -> Result<(modelq::diagnostics::ReconstructionMetrics, u64), String> {
     if scale_bytes.len() != 4 {
         return Err(format!(
@@ -518,22 +529,21 @@ fn check_quantized_int8(
             .try_into()
             .expect("the scale length was checked above"),
     );
-    validate_dequantization(qdata.iter().copied().map(|value| value as i8), scale)
-        .map_err(|error| format!("could not dequantize {:?}: {error}", tensor.name))?;
-    let metrics = source
-        .with_tensor(&tensor.source_name, |source_view| {
-            reconstruction_metrics_streaming(
-                source_view.values(),
-                qdata
-                    .iter()
-                    .copied()
-                    .map(|value| f32::from(value as i8) * scale),
-            )
+    source
+        .with_tensor(&tensor.source_name, |view| {
+            parallel_int8::validate_and_measure(|| view.values(), qdata, scale, config)
         })
         .map_err(|error| error.to_string())?
-        .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
-    let saturated = saturation_count_iter(qdata.iter().copied().map(|value| value as i8));
-    Ok((metrics, saturated))
+        .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))
+}
+
+/// Worker count for the parallel paths: `--threads N`, or every CPU.
+fn worker_count(matches: &ArgMatches) -> Result<usize, String> {
+    match matches.get_one::<usize>("threads").copied() {
+        Some(0) => Err("--threads must be at least 1".to_owned()),
+        Some(workers) => Ok(workers),
+        None => Ok(ParallelConfig::automatic(1).workers),
+    }
 }
 
 fn print_quantize_report(report: &QuantizeReport) {

@@ -186,14 +186,4 @@ fn cli_rejects_bad_thread_options_before_writing() {
             .success()
     );
     assert!(!output.exists());
-
-    let int8 = Command::new(env!("CARGO_BIN_EXE_modelq"))
-        .arg("quantize")
-        .arg(&source)
-        .args(["--format", "int8", "--threads", "4", "--output"])
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(!int8.status.success());
-    assert!(!output.exists());
 }
