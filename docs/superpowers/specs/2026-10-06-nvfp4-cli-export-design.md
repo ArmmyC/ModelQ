@@ -86,7 +86,7 @@ modelq quantize <MODEL> --format nvfp4 --output <PATH>
 - `--device` accepts only `cpu`.
 - `--exclude` and `--no-default-excludes` apply only to `nvfp4`; passing them with `int8` is an error.
 - Progress lines list every tensor with quantize/preserve and the reason, as the INT8 command does.
-- After writing, the command reopens the output with `read_nvfp4_safetensors`, dequantizes every quantized tensor, and reports max MSE, max MAE, max absolute error, lowest SQNR, and the size change. A failed reopen or any non-finite result is an error, and the output file is left in place only if the reopen succeeded (a failed validation reports the path and non-zero exit).
+- After writing, the command reopens the output with `read_nvfp4_safetensors`, dequantizes every quantized tensor, and reports max MSE, max MAE, max absolute error, lowest SQNR, and the size change. A failed reopen or any non-finite result exits non-zero and names the output path; as with INT8, the already-committed file is not deleted.
 - The final report states: "ModelQ-native NVFP4 output; no runtime compatibility is implied."
 
 ### 6. Errors and failure safety
