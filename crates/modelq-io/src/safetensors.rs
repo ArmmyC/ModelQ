@@ -532,6 +532,60 @@ impl MappedSafetensors {
     }
 }
 
+/// A read-only collection of validated source tensors.
+///
+/// Implemented by a single mapped file and by sharded input so writers and
+/// commands do not depend on the physical layout. Payload access is
+/// closure-scoped: a borrowed payload or view never outlives the mapping that
+/// backs it.
+pub trait TensorSource {
+    /// Physical files backing this source, used to refuse in-place writes.
+    fn source_paths(&self) -> Vec<PathBuf>;
+
+    /// Tensor metadata for the whole source.
+    fn tensor_summaries(&self) -> Vec<TensorSummary>;
+
+    /// Calls `f` with one tensor's raw payload bytes.
+    fn with_tensor_bytes<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, SafetensorsError>;
+
+    /// Calls `f` with one tensor's typed floating-point view.
+    fn with_tensor<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(TensorView<'_>) -> R,
+    ) -> Result<R, SafetensorsError>;
+}
+
+impl TensorSource for MappedSafetensors {
+    fn source_paths(&self) -> Vec<PathBuf> {
+        vec![self.path().to_owned()]
+    }
+
+    fn tensor_summaries(&self) -> Vec<TensorSummary> {
+        self.tensors().cloned().collect()
+    }
+
+    fn with_tensor_bytes<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, SafetensorsError> {
+        self.tensor_bytes(name).map(f)
+    }
+
+    fn with_tensor<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(TensorView<'_>) -> R,
+    ) -> Result<R, SafetensorsError> {
+        self.tensor(name).map(f)
+    }
+}
+
 fn view_dtype(dtype: &str) -> Option<DType> {
     match dtype {
         "F32" => Some(DType::F32),

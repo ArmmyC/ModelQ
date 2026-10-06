@@ -78,12 +78,14 @@ and it does not add CUDA, swizzling, columnwise data, or a hardware claim. See
 [ADR 0012](docs/adr/0012-transformer-engine-nvfp4-export-profile.md) for the
 boundary and follow-up requirements.
 
-Task 29 implements the ADR 0003 input contract as a library-only reader,
+Task 29 implements the ADR 0003 input contract as
 `modelq_io::sharded::SafetensorsInput`. It opens a single file, a directory, or
 a `*.safetensors.index.json` plus its shards, validates every shard and the
 index before returning, and exposes one tensor catalog in name order. Payloads
-are mapped per call, one shard at a time. The CLI does not use it yet, and
-output sharding is not implemented.
+are mapped per call, one shard at a time. Task 30 wires it into the CLI:
+`modelq inspect` and `modelq quantize --format int8` accept a checkpoint
+directory or index path as well as a single file. The INT8 output is still one
+SafeTensors file; output sharding and sharded NVFP4 export are not implemented.
 
 ## Requirements
 

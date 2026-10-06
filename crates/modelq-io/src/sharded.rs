@@ -10,7 +10,7 @@ use std::{
 use modelq_core::tensor::TensorView;
 use serde_json::Value;
 
-use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSummary};
+use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSource, TensorSummary};
 
 const INDEX_SUFFIX: &str = ".index.json";
 const SAFETENSORS_SUFFIX: &str = ".safetensors";
@@ -339,18 +339,68 @@ impl SafetensorsInput {
             }
         }
 
-        if let Some(expected) = index.total_size
-            && expected != total
-        {
-            return Err(ShardedError::TotalSizeMismatch {
-                index: index_path.to_owned(),
-                expected,
-                actual: total,
-            });
+        if let Some(expected) = index.total_size {
+            if expected != total {
+                return Err(ShardedError::TotalSizeMismatch {
+                    index: index_path.to_owned(),
+                    expected,
+                    actual: total,
+                });
+            }
         }
 
         sort_by_name(&mut tensors);
         Ok(Self { tensors })
+    }
+}
+
+impl TensorSource for SafetensorsInput {
+    fn source_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = self
+            .tensors
+            .iter()
+            .map(|tensor| tensor.shard.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn tensor_summaries(&self) -> Vec<TensorSummary> {
+        self.tensors
+            .iter()
+            .map(|tensor| tensor.summary.clone())
+            .collect()
+    }
+
+    fn with_tensor_bytes<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, SafetensorsError> {
+        Self::with_tensor_bytes(self, name, f).map_err(into_safetensors_error)
+    }
+
+    fn with_tensor<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(TensorView<'_>) -> R,
+    ) -> Result<R, SafetensorsError> {
+        Self::with_tensor(self, name, f).map_err(into_safetensors_error)
+    }
+}
+
+fn into_safetensors_error(error: ShardedError) -> SafetensorsError {
+    match error {
+        ShardedError::Safetensors(error) => error,
+        ShardedError::TensorNotFound { name } => SafetensorsError::TensorNotFound {
+            path: PathBuf::new(),
+            name,
+        },
+        other => SafetensorsError::InvalidMetadata {
+            path: PathBuf::new(),
+            message: other.to_string(),
+        },
     }
 }
 
