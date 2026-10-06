@@ -1,6 +1,6 @@
 # NVFP4 CLI Export over Sharded Input
 
-- Status: draft for review
+- Status: approved (Decision 2 option A chosen 2026-10-06); implementation pending
 - Date: 2026-10-06
 - Scope: a `modelq quantize --format nvfp4` command that reads a single or sharded SafeTensors checkpoint and writes one ModelQ-native NVFP4 SafeTensors file
 - Related decisions: [ADR 0003](../../adr/0003-sharded-safetensors-input-design.md), [ADR 0010](../../adr/0010-nvfp4-research-spike.md), [ADR 0011](../../adr/0011-nvfp4-native-safetensors-convention.md), [ADR 0012](../../adr/0012-transformer-engine-nvfp4-export-profile.md), [ADR 0013](../../adr/0013-transformer-engine-nvfp4-runtime-container.md)
@@ -58,7 +58,7 @@ Exclusions: by default, names containing `embed_tokens`, `lm_head`, or `embeddin
 
 The policy lives beside the INT8 policy in `modelq-quant` as a separate type (`Nvfp4Policy`) with its own `DecisionReason`-style enum. INT8 behavior does not change.
 
-*Open for review:* name-substring exclusion is a heuristic. The alternative is shape/dtype rules only, with no default name exclusions. I recommend the defaults above because quantizing `lm_head`/embeddings silently is the more harmful failure, and the flag removes them.
+*Reviewed and accepted (option A):* name-substring exclusion is a heuristic. The alternative is shape/dtype rules only, with no default name exclusions. I recommend the defaults above because quantizing `lm_head`/embeddings silently is the more harmful failure, and the flag removes them.
 
 ### 3. Streaming quantizer
 
