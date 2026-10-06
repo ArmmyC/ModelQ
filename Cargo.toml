@@ -33,3 +33,7 @@ serde_json = { version = "=1.0.151", default-features = false, features = ["std"
 [[bench]]
 name = "cpu_parallel"
 harness = false
+
+[[bench]]
+name = "nvfp4_parallel"
+harness = false

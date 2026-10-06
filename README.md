@@ -117,6 +117,13 @@ its scales are never split across shards, a failed run removes everything it
 created, and the tensors match the single-file output byte for byte. See
 [ADR 0015](docs/adr/0015-sharded-output.md).
 
+Task 34 runs the NVFP4 quantizer on multiple CPU threads. It is the default
+for `modelq quantize --format nvfp4`; `--threads N` sets the worker count and
+`--threads 1` selects the sequential reference path. Output is byte-identical
+for every thread count. On a 16M-value benchmark the parallel path was about
+4.6x faster with 18 workers (`cargo bench --bench nvfp4_parallel`). See
+[ADR 0016](docs/adr/0016-parallel-nvfp4.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

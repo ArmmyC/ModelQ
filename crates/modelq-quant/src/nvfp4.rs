@@ -53,6 +53,8 @@ pub enum Nvfp4Error {
     DequantizedValueOverflow { index: usize },
     /// A streaming chunk size of zero blocks was requested.
     InvalidChunkSize { chunk_blocks: usize },
+    /// A chunk does not start on a block boundary.
+    MisalignedChunk { first_index: usize },
 }
 
 impl fmt::Display for Nvfp4Error {
@@ -113,6 +115,10 @@ impl fmt::Display for Nvfp4Error {
             Self::InvalidChunkSize { chunk_blocks } => write!(
                 formatter,
                 "NVFP4 streaming chunk size must be positive, got {chunk_blocks} blocks"
+            ),
+            Self::MisalignedChunk { first_index } => write!(
+                formatter,
+                "NVFP4 chunk starting at index {first_index} is not aligned to {BLOCK_SIZE}-value blocks"
             ),
         }
     }
@@ -223,7 +229,7 @@ impl QuantizedTensor {
 /// layout.
 pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
     let global_amax = max_abs(values)?;
-    let global_scale = global_scale_for(global_amax);
+    let global_scale = global_scale_for_amax(global_amax);
 
     let mut unpacked = Vec::with_capacity(values.len());
     let mut block_scales = Vec::with_capacity(block_count(values.len()));
@@ -264,7 +270,11 @@ pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTenso
     quantize(values)
 }
 
-fn checked_shape_elements(shape: &[usize]) -> Result<usize, Nvfp4Error> {
+/// Validates a shape for NVFP4 and returns its checked element count.
+///
+/// Requires a non-empty shape of positive dimensions whose final dimension is
+/// divisible by [`BLOCK_SIZE`].
+pub fn checked_shape_elements(shape: &[usize]) -> Result<usize, Nvfp4Error> {
     if shape.is_empty()
         || shape.contains(&0)
         || !shape
@@ -283,7 +293,11 @@ fn checked_shape_elements(shape: &[usize]) -> Result<usize, Nvfp4Error> {
         })
 }
 
-fn global_scale_for(global_amax: f32) -> f32 {
+/// Returns the tensor-wide F32 decode scale for a finite tensor-wide amax.
+///
+/// An all-zero tensor (`amax == 0`) uses `1.0`.  Exposed so alternate
+/// execution backends derive exactly the reference scale.
+pub fn global_scale_for_amax(global_amax: f32) -> f32 {
     if global_amax == 0.0 {
         1.0
     } else {
@@ -331,6 +345,75 @@ fn encode_block(
     Ok(())
 }
 
+/// Returns the largest absolute value in a chunk of finite values.
+///
+/// `first_index` is the flattened index of `values[0]` and is used to report
+/// the first non-finite value with its tensor-wide index.  Combine chunk
+/// results with `f32::max` to obtain the tensor-wide amax.
+pub fn scan_chunk_amax(values: &[f32], first_index: usize) -> Result<f32, Nvfp4Error> {
+    let mut maximum = 0.0_f32;
+    for (offset, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(Nvfp4Error::NonFiniteInput {
+                index: first_index + offset,
+                value,
+            });
+        }
+        maximum = maximum.max(value.abs());
+    }
+    Ok(maximum)
+}
+
+/// Encodes a block-aligned run of values into caller-provided buffers.
+///
+/// This is the single kernel shared by the reference, sequential streaming,
+/// and parallel backends, so they cannot diverge.  `first_index` must be a
+/// multiple of [`BLOCK_SIZE`] (the run starts on a block boundary); only the
+/// final run of a tensor may end in a partial block.  `packed` must hold
+/// exactly [`packed_len`] bytes and `block_scales` exactly [`block_count`]
+/// entries for `values.len()`.  `global_amax` is the tensor-wide amax.
+pub fn encode_chunk(
+    values: &[f32],
+    first_index: usize,
+    global_amax: f32,
+    packed: &mut [u8],
+    block_scales: &mut [u8],
+) -> Result<(), Nvfp4Error> {
+    if first_index % BLOCK_SIZE != 0 {
+        return Err(Nvfp4Error::MisalignedChunk { first_index });
+    }
+    let expected_packed = packed_len(values.len());
+    if packed.len() != expected_packed {
+        return Err(Nvfp4Error::PackedLengthMismatch {
+            elements: values.len(),
+            expected: expected_packed,
+            actual: packed.len(),
+        });
+    }
+    let expected_blocks = block_count(values.len());
+    if block_scales.len() != expected_blocks {
+        return Err(Nvfp4Error::BlockScaleCountMismatch {
+            expected: expected_blocks,
+            actual: block_scales.len(),
+        });
+    }
+
+    let mut codes = Vec::with_capacity(values.len());
+    let mut scales = Vec::with_capacity(expected_blocks);
+    for (block, chunk) in values.chunks(BLOCK_SIZE).enumerate() {
+        encode_block(
+            chunk,
+            first_index + block * BLOCK_SIZE,
+            global_amax,
+            &mut scales,
+            &mut codes,
+        )?;
+    }
+    block_scales.copy_from_slice(&scales);
+    packed.copy_from_slice(&pack(&codes)?);
+    Ok(())
+}
+
 /// Default number of blocks quantized per emitted chunk (4096 blocks =
 /// 65,536 values, 32 KiB packed).
 pub const DEFAULT_CHUNK_BLOCKS: usize = 4096;
@@ -345,6 +428,15 @@ pub struct StreamedQuantization {
 }
 
 impl StreamedQuantization {
+    /// Assembles tensor-level results produced by a streaming backend.
+    pub fn new(block_scales: Vec<u8>, global_scale: f32, elements: usize) -> Self {
+        Self {
+            block_scales,
+            global_scale,
+            elements,
+        }
+    }
+
     /// E4M3 block scale bit patterns, one per 16 values.
     pub fn block_scales(&self) -> &[u8] {
         &self.block_scales
@@ -412,11 +504,11 @@ where
             actual: seen,
         }));
     }
-    let global_scale = global_scale_for(global_amax);
+    let global_scale = global_scale_for_amax(global_amax);
 
     let chunk_values = chunk_blocks.saturating_mul(BLOCK_SIZE);
     let mut buffer: Vec<f32> = Vec::with_capacity(chunk_values.min(expected));
-    let mut codes: Vec<u8> = Vec::with_capacity(buffer.capacity());
+    let mut packed: Vec<u8> = Vec::with_capacity(packed_len(buffer.capacity()));
     let mut block_scales = Vec::with_capacity(block_count(expected));
     let mut start = 0_usize;
     let mut source = values().into_iter();
@@ -426,21 +518,20 @@ where
         if buffer.is_empty() {
             break;
         }
-        codes.clear();
-        for (block, chunk) in buffer.chunks(BLOCK_SIZE).enumerate() {
-            encode_block(
-                chunk,
-                start + block * BLOCK_SIZE,
-                global_amax,
-                &mut block_scales,
-                &mut codes,
-            )
-            .map_err(fail)?;
-        }
-        start += buffer.len();
         // Chunks hold whole blocks, so each starts on a byte boundary and
         // per-chunk packing concatenates to the whole-tensor packing.
-        let packed = pack(&codes).map_err(fail)?;
+        let scale_start = block_scales.len();
+        block_scales.resize(scale_start + block_count(buffer.len()), 0);
+        packed.resize(packed_len(buffer.len()), 0);
+        encode_chunk(
+            &buffer,
+            start,
+            global_amax,
+            &mut packed,
+            &mut block_scales[scale_start..],
+        )
+        .map_err(fail)?;
+        start += buffer.len();
         emit(&packed).map_err(Nvfp4StreamError::Callback)?;
     }
     if start != expected {

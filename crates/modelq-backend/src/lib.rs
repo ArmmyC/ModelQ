@@ -5,3 +5,4 @@
 //! compared with the scalar reference without changing the representations.
 
 pub mod cpu;
+pub mod nvfp4;

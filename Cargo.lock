@@ -114,6 +114,7 @@ name = "modelq-io"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+ "modelq-backend",
  "modelq-core",
  "modelq-quant",
  "serde_json",
