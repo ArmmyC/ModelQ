@@ -12,9 +12,13 @@ use std::{
 
 use crate::output::OutputTarget;
 use modelq::{
+    backend::{cpu::ParallelConfig, nvfp4 as parallel_nvfp4},
     diagnostics::reconstruction_metrics_streaming,
     io::{
-        nvfp4::{Nvfp4OutputPlan, Nvfp4OutputRole, plan_nvfp4_output, write_nvfp4_safetensors},
+        nvfp4::{
+            Nvfp4Execution, Nvfp4OutputPlan, Nvfp4OutputRole, plan_nvfp4_output,
+            write_nvfp4_safetensors_with,
+        },
         safetensors::{TensorSource, TensorSummary},
         sharded::SafetensorsInput,
     },
@@ -29,9 +33,25 @@ use modelq::{
 pub struct Nvfp4Options {
     pub exclude: Vec<String>,
     pub default_excludes: bool,
+    /// Worker threads; `None` uses every CPU and `Some(1)` the sequential path.
+    pub threads: Option<usize>,
 }
 
 impl Nvfp4Options {
+    fn execution(&self) -> Result<Nvfp4Execution, String> {
+        match self.threads {
+            Some(0) => Err("--threads must be at least 1".to_owned()),
+            Some(1) => Ok(Nvfp4Execution::Sequential),
+            Some(workers) => Ok(Nvfp4Execution::Parallel(ParallelConfig::new(
+                workers,
+                parallel_nvfp4::DEFAULT_CHUNK_ELEMENTS,
+            ))),
+            None => Ok(Nvfp4Execution::Parallel(ParallelConfig::automatic(
+                parallel_nvfp4::DEFAULT_CHUNK_ELEMENTS,
+            ))),
+        }
+    }
+
     fn policy(&self) -> Nvfp4Policy {
         let mut policy = Nvfp4Policy::new();
         if !self.default_excludes {
@@ -69,6 +89,7 @@ fn quantize(
     target: &OutputTarget,
     options: &Nvfp4Options,
 ) -> Result<Nvfp4Report, String> {
+    let execution = options.execution()?;
     println!("Inspecting source: {}", input.display());
     let source = SafetensorsInput::open(input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();
@@ -118,6 +139,15 @@ fn quantize(
     );
     print_decisions(&decisions);
 
+    match execution {
+        Nvfp4Execution::Sequential => println!("Execution: sequential"),
+        Nvfp4Execution::Parallel(config) => {
+            println!(
+                "Execution: parallel, up to {} workers",
+                config.workers.min(64)
+            );
+        }
+    }
     println!("Writing output: {}", target.describe());
     let mut sized: BTreeMap<String, u64> = BTreeMap::new();
     for tensor in &plan.tensors {
@@ -137,7 +167,8 @@ fn quantize(
             .collect();
         let subset_plan = plan_nvfp4_output(&subset_summaries, &subset_selected)
             .map_err(|error| format!("could not plan shard: {error}"))?;
-        write_nvfp4_safetensors(subset, &subset_plan, path).map_err(|error| error.to_string())?;
+        write_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
+            .map_err(|error| error.to_string())?;
         Ok::<_, String>(
             subset_plan
                 .tensors

@@ -18,6 +18,7 @@ use std::{
 use serde_json::{Map, Value};
 
 use crate::safetensors::{MappedSafetensors, SafetensorsError, TensorSource, TensorSummary};
+use modelq_backend::cpu::ParallelConfig;
 use modelq_quant::nvfp4::{self, Nvfp4Error};
 
 const U8_DTYPE: &str = "U8";
@@ -1225,6 +1226,8 @@ fn invalid_manifest(message: impl Into<String>) -> Nvfp4ReaderError {
 /// Errors returned while creating a native NVFP4 SafeTensors output.
 #[derive(Debug)]
 pub enum Nvfp4WriterError {
+    /// The parallel execution configuration was invalid or a worker failed.
+    Execution { message: String },
     /// The destination already exists.
     DestinationExists { path: PathBuf },
     /// The source and destination resolve to the same existing path.
@@ -1275,6 +1278,9 @@ pub enum Nvfp4WriterError {
 impl fmt::Display for Nvfp4WriterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Execution { message } => {
+                write!(formatter, "NVFP4 execution failed: {message}")
+            }
             Self::DestinationExists { path } => {
                 write!(
                     formatter,
@@ -1364,7 +1370,21 @@ impl std::error::Error for Nvfp4WriterError {
     }
 }
 
+/// How the writer executes NVFP4 quantization.
+///
+/// Both modes produce byte-identical files; `Parallel` only changes speed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nvfp4Execution {
+    /// The scalar streaming reference path on the calling thread.
+    Sequential,
+    /// The bounded parallel CPU path from `modelq-backend`.
+    Parallel(ParallelConfig),
+}
+
 /// Writes a ModelQ-native NVFP4 SafeTensors file from a checked output plan.
+///
+/// Runs the sequential reference path; see
+/// [`write_nvfp4_safetensors_with`] to choose parallel execution.
 ///
 /// The source mapping remains read-only.  The destination must not already
 /// exist; data is written to a unique temporary file beside it and renamed
@@ -1375,6 +1395,16 @@ pub fn write_nvfp4_safetensors(
     source: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
     destination: impl AsRef<Path>,
+) -> Result<(), Nvfp4WriterError> {
+    write_nvfp4_safetensors_with(source, plan, destination, Nvfp4Execution::Sequential)
+}
+
+/// Like [`write_nvfp4_safetensors`] with an explicit execution mode.
+pub fn write_nvfp4_safetensors_with(
+    source: &impl TensorSource,
+    plan: &Nvfp4OutputPlan,
+    destination: impl AsRef<Path>,
+    execution: Nvfp4Execution,
 ) -> Result<(), Nvfp4WriterError> {
     let destination = destination.as_ref().to_owned();
     if destination.file_name().is_none() {
@@ -1408,7 +1438,7 @@ pub fn write_nvfp4_safetensors(
     let write_result = (|| {
         file.write_all(&header)
             .map_err(|source| io_error(&destination, source))?;
-        write_data(&mut file, &destination, source, plan)?;
+        write_data(&mut file, &destination, source, plan, execution)?;
         file.sync_all()
             .map_err(|source| io_error(&destination, source))
     })();
@@ -1610,6 +1640,7 @@ fn write_data(
     output_path: &Path,
     source: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
+    execution: Nvfp4Execution,
 ) -> Result<(), Nvfp4WriterError> {
     let mut cursor = 0_u64;
     let mut quantized_tensors = BTreeMap::new();
@@ -1653,18 +1684,43 @@ fn write_data(
                         &tensor.source_name,
                         |view| -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
                             let mut written = 0_u64;
-                            let result = nvfp4::quantize_replay_chunks(
-                                view.shape(),
-                                || view.values(),
-                                nvfp4::DEFAULT_CHUNK_BLOCKS,
-                                |chunk| {
-                                    written = written.saturating_add(
-                                        u64::try_from(chunk.len()).unwrap_or(u64::MAX),
-                                    );
-                                    file.write_all(chunk)
-                                        .map_err(|source| io_error(output_path, source))
-                                },
-                            );
+                            let mut emit = |chunk: &[u8]| {
+                                written = written
+                                    .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                                file.write_all(chunk)
+                                    .map_err(|source| io_error(output_path, source))
+                            };
+                            let result = match execution {
+                                Nvfp4Execution::Sequential => nvfp4::quantize_replay_chunks(
+                                    view.shape(),
+                                    || view.values(),
+                                    nvfp4::DEFAULT_CHUNK_BLOCKS,
+                                    &mut emit,
+                                ),
+                                Nvfp4Execution::Parallel(config) => {
+                                    modelq_backend::nvfp4::quantize_replay_chunks(
+                                        view.shape(),
+                                        || view.values(),
+                                        config,
+                                        &mut emit,
+                                    )
+                                    .map_err(|error| {
+                                        match error {
+                                        modelq_backend::nvfp4::Nvfp4ParallelError::Quantization(
+                                            source,
+                                        ) => nvfp4::Nvfp4StreamError::Quantization(source),
+                                        modelq_backend::nvfp4::Nvfp4ParallelError::Callback(
+                                            error,
+                                        ) => nvfp4::Nvfp4StreamError::Callback(error),
+                                        other => nvfp4::Nvfp4StreamError::Callback(
+                                            Nvfp4WriterError::Execution {
+                                                message: other.to_string(),
+                                            },
+                                        ),
+                                    }
+                                    })
+                                }
+                            };
                             let streamed = match result {
                                 Ok(streamed) => streamed,
                                 Err(nvfp4::Nvfp4StreamError::Quantization(source)) => {

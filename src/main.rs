@@ -132,6 +132,13 @@ fn build_cli() -> Command {
                         ),
                 )
                 .arg(
+                    Arg::new("threads")
+                        .long("threads")
+                        .value_name("N")
+                        .value_parser(value_parser!(usize))
+                        .help("nvfp4 only: worker threads (default: all CPUs; 1 = sequential)"),
+                )
+                .arg(
                     Arg::new("exclude")
                         .long("exclude")
                         .value_name("SUBSTRING")
@@ -182,13 +189,15 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
     let format = matches
         .get_one::<String>("format")
         .ok_or_else(|| "quantize requires --format <int8|nvfp4>".to_owned())?;
-    let has_nvfp4_options =
-        matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
+    let has_nvfp4_options = matches.contains_id("exclude")
+        || matches.contains_id("threads")
+        || matches.get_flag("no-default-excludes");
     match format.as_str() {
         "int8" => {
             if has_nvfp4_options {
                 return Err(
-                    "--exclude and --no-default-excludes apply only to --format nvfp4".to_owned(),
+                    "--exclude, --no-default-excludes and --threads apply only to --format nvfp4"
+                        .to_owned(),
                 );
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
@@ -206,6 +215,7 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                     .map(|values| values.cloned().collect())
                     .unwrap_or_default(),
                 default_excludes: !matches.get_flag("no-default-excludes"),
+                threads: matches.get_one::<usize>("threads").copied(),
             };
             nvfp4_command::run(&input, &target, &options)
         }
