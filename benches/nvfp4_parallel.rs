@@ -16,7 +16,7 @@ use modelq::quant::nvfp4::{DEFAULT_CHUNK_BLOCKS, quantize_replay_chunks as seque
 
 const ELEMENTS: usize = 1 << 24;
 const COLUMNS: usize = 4096;
-const ITERATIONS: usize = 3;
+const ITERATIONS: usize = 9;
 
 fn main() {
     let values: Vec<f32> = (0..ELEMENTS)

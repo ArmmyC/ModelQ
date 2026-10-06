@@ -20,11 +20,7 @@
 //! they equal the scalar left-to-right sums exactly; for larger tensors they
 //! can differ from the scalar sums in the last few bits of the `f64` result.
 
-use std::{
-    fmt,
-    sync::{Mutex, PoisonError},
-    thread,
-};
+use std::fmt;
 
 use modelq_quant::{
     diagnostics::{
@@ -37,7 +33,10 @@ use modelq_quant::{
     },
 };
 
-use crate::cpu::{MAX_WORKERS, ParallelConfig};
+use crate::{
+    cpu::{MAX_WORKERS, ParallelConfig},
+    schedule::{self, RANGES_PER_WORKER, WorkerPanicked},
+};
 
 /// Default values per chunk (4,194,304 values: 16 MiB of `f32`).
 pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 22;
@@ -115,9 +114,6 @@ fn settings<E>(config: ParallelConfig) -> Result<Settings, Int8ParallelError<E>>
     })
 }
 
-/// Ranges handed out per worker, so faster cores can take more of them.
-const RANGES_PER_WORKER: usize = 4;
-
 /// Values per range: a whole number of metrics blocks.
 fn range_len(len: usize, workers: usize) -> usize {
     let blocks = len.div_ceil(METRICS_BLOCK_ELEMENTS);
@@ -127,13 +123,7 @@ fn range_len(len: usize, workers: usize) -> usize {
     blocks.div_ceil(used) * METRICS_BLOCK_ELEMENTS
 }
 
-/// Runs `work` on every item with up to `threads` scoped threads and returns
-/// the results in item order.
-///
-/// Items are handed out dynamically from a shared queue, so a slow core (an
-/// efficiency core, or one competing with other work) takes fewer items
-/// instead of stalling the whole chunk.  Results are re-sorted by item index,
-/// so the output never depends on which thread ran what.
+/// Runs `work` on every item through the shared dynamic scheduler.
 fn run_all<T, R, E>(
     items: Vec<T>,
     threads: usize,
@@ -143,38 +133,8 @@ where
     T: Send,
     R: Send,
 {
-    let threads = threads.min(items.len());
-    if threads <= 1 {
-        return Ok(items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| work(index, item))
-            .collect());
-    }
-    let queue = Mutex::new(items.into_iter().enumerate());
-    let (queue, work) = (&queue, &work);
-    let finished: Vec<Vec<(usize, R)>> = thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                scope.spawn(move || {
-                    let mut done = Vec::new();
-                    loop {
-                        let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
-                        let Some((index, item)) = next else { break };
-                        done.push((index, work(index, item)));
-                    }
-                    done
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().map_err(|_| Int8ParallelError::WorkerPanicked))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-    let mut results: Vec<(usize, R)> = finished.into_iter().flatten().collect();
-    results.sort_by_key(|(index, _)| *index);
-    Ok(results.into_iter().map(|(_, result)| result).collect())
+    schedule::run_all(items, threads, work)
+        .map_err(|WorkerPanicked| Int8ParallelError::WorkerPanicked)
 }
 
 /// Computes the tensor scale from the largest absolute value over all
