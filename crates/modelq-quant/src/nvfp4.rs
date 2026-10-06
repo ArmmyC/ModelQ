@@ -231,19 +231,9 @@ pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
     let global_amax = max_abs(values)?;
     let global_scale = global_scale_for_amax(global_amax);
 
-    let mut unpacked = Vec::with_capacity(values.len());
-    let mut block_scales = Vec::with_capacity(block_count(values.len()));
-    for (block, chunk) in values.chunks(BLOCK_SIZE).enumerate() {
-        encode_block(
-            chunk,
-            block * BLOCK_SIZE,
-            global_amax,
-            &mut block_scales,
-            &mut unpacked,
-        )?;
-    }
-
-    let packed = pack(&unpacked)?;
+    let mut packed = vec![0_u8; packed_len(values.len())];
+    let mut block_scales = vec![0_u8; block_count(values.len())];
+    encode_chunk(values, 0, global_amax, &mut packed, &mut block_scales)?;
     Ok(QuantizedTensor {
         packed,
         block_scales,
@@ -305,25 +295,25 @@ pub fn global_scale_for_amax(global_amax: f32) -> f32 {
     }
 }
 
-/// Encodes one block, appending its scale to `block_scales` and one E2M1 code
-/// per value to `codes`.  `start_index` is the flattened index of `chunk[0]`
-/// and is used only for error reporting.  The reference and streaming paths
+/// Encodes one block of at most [`BLOCK_SIZE`] values, writing one E2M1 code
+/// per value into `codes` and returning the block's E4M3 scale bits.
+/// `start_index` is the flattened index of `chunk[0]` and is used only for
+/// error reporting.  The reference, sequential streaming, and parallel paths
 /// share this encoder so their output cannot diverge.
-fn encode_block(
+#[inline]
+fn encode_block_into(
     chunk: &[f32],
     start_index: usize,
     global_amax: f32,
-    block_scales: &mut Vec<u8>,
-    codes: &mut Vec<u8>,
-) -> Result<(), Nvfp4Error> {
+    codes: &mut [u8; BLOCK_SIZE],
+) -> Result<u8, Nvfp4Error> {
     let block_amax = chunk
         .iter()
         .map(|value| value.abs())
         .fold(0.0_f32, f32::max);
     if block_amax == 0.0 {
-        block_scales.push(0);
-        codes.extend(std::iter::repeat_n(0, chunk.len()));
-        return Ok(());
+        codes.fill(0);
+        return Ok(0);
     }
 
     let scale_input = (block_amax / global_amax) * FP8_MAX;
@@ -332,17 +322,31 @@ fn encode_block(
         scale_bits = MIN_POSITIVE_E4M3_BITS;
     }
     let decoded_block_scale = fp8_e4m3::decode(scale_bits);
-    block_scales.push(scale_bits);
 
-    for (offset, &value) in chunk.iter().enumerate() {
+    // A branch-free loop the compiler can vectorize.  The two divisions are
+    // kept as divisions: replacing them with a reciprocal multiply would
+    // change rounding and therefore the produced bits.
+    let mut has_nan = false;
+    for (code, &value) in codes.iter_mut().zip(chunk) {
         let scaled = ((value / global_amax) * SCALE_PRODUCT) / decoded_block_scale;
-        let code = fp4_e2m1::encode(scaled).map_err(|_| Nvfp4Error::NonFiniteInput {
+        has_nan |= scaled.is_nan();
+        *code = fp4_e2m1::encode_unchecked(scaled);
+    }
+    if has_nan {
+        // Report the first offending value, as the element codec would.
+        let (offset, &value) = chunk
+            .iter()
+            .enumerate()
+            .find(|(_, value)| {
+                (((**value / global_amax) * SCALE_PRODUCT) / decoded_block_scale).is_nan()
+            })
+            .expect("a NaN was flagged in this block");
+        return Err(Nvfp4Error::NonFiniteInput {
             index: start_index + offset,
             value,
-        })?;
-        codes.push(code);
+        });
     }
-    Ok(())
+    Ok(scale_bits)
 }
 
 /// Returns the largest absolute value in a chunk of finite values.
@@ -398,19 +402,27 @@ pub fn encode_chunk(
         });
     }
 
-    let mut codes = Vec::with_capacity(values.len());
-    let mut scales = Vec::with_capacity(expected_blocks);
+    let mut codes = [0_u8; BLOCK_SIZE];
     for (block, chunk) in values.chunks(BLOCK_SIZE).enumerate() {
-        encode_block(
+        block_scales[block] = encode_block_into(
             chunk,
             first_index + block * BLOCK_SIZE,
             global_amax,
-            &mut scales,
             &mut codes,
         )?;
+        // Two codes per byte, first value in the low nibble.  A partial final
+        // block leaves the high nibble of its last byte zero.
+        let first_byte = block * (BLOCK_SIZE / VALUES_PER_BYTE);
+        for pair in 0..chunk.len().div_ceil(VALUES_PER_BYTE) {
+            let low = codes[pair * VALUES_PER_BYTE];
+            let high = if pair * VALUES_PER_BYTE + 1 < chunk.len() {
+                codes[pair * VALUES_PER_BYTE + 1]
+            } else {
+                0
+            };
+            packed[first_byte + pair] = low | (high << 4);
+        }
     }
-    block_scales.copy_from_slice(&scales);
-    packed.copy_from_slice(&pack(&codes)?);
     Ok(())
 }
 
@@ -1103,5 +1115,109 @@ mod tests {
             dequantize_iter(&[0xff], &[0x38], 1.0, 16),
             Err(Nvfp4Error::PackedLengthMismatch { .. })
         ));
+    }
+
+    /// The original whole-tensor algorithm: per-value candidate-search
+    /// codecs and a scratch `Vec` per block, kept as an oracle independent of
+    /// the production kernel.
+    fn reference_quantize(values: &[f32]) -> (Vec<u8>, Vec<u8>, f32) {
+        use crate::float::reference;
+
+        let global_amax = values
+            .iter()
+            .fold(0.0_f32, |amax, value| amax.max(value.abs()));
+        let global_scale = if global_amax == 0.0 {
+            1.0
+        } else {
+            (global_amax / super::SCALE_PRODUCT).max(f32::from_bits(1))
+        };
+        let mut codes = Vec::new();
+        let mut scales = Vec::new();
+        for chunk in values.chunks(BLOCK_SIZE) {
+            let block_amax = chunk
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f32, f32::max);
+            if block_amax == 0.0 {
+                scales.push(0);
+                codes.extend(std::iter::repeat_n(0, chunk.len()));
+                continue;
+            }
+            let scale_input = (block_amax / global_amax) * FP8_MAX;
+            let mut scale_bits = reference::encode_e4m3(scale_input);
+            if scale_bits == 0 {
+                scale_bits = 0x01;
+            }
+            let decoded = reference::decode_e4m3(scale_bits);
+            scales.push(scale_bits);
+            for &value in chunk {
+                let scaled = ((value / global_amax) * super::SCALE_PRODUCT) / decoded;
+                codes.push(reference::encode_e2m1(scaled).expect("finite"));
+            }
+        }
+        (
+            pack(&codes).expect("codes fit a nibble"),
+            scales,
+            global_scale,
+        )
+    }
+
+    fn assert_matches_original_algorithm(values: &[f32]) {
+        let (packed, scales, global_scale) = reference_quantize(values);
+        let quantized = quantize(values).expect("quantizes");
+        assert_eq!(quantized.packed(), packed);
+        assert_eq!(quantized.block_scales(), scales);
+        assert_eq!(quantized.global_scale().to_bits(), global_scale.to_bits());
+    }
+
+    #[test]
+    fn production_kernel_matches_the_original_algorithm() {
+        // Lengths include partial final blocks and odd counts.
+        for (count, seed) in [
+            (1, 1),
+            (15, 2),
+            (16, 3),
+            (17, 4),
+            (31, 5),
+            (4096, 6),
+            (65_537, 7),
+        ] {
+            assert_matches_original_algorithm(&spread_values(count, seed));
+        }
+        assert_matches_original_algorithm(&[0.0; 64]);
+        let mut outlier = vec![0.001_f32; 160];
+        outlier[77] = 6.0e6;
+        assert_matches_original_algorithm(&outlier);
+        let mut tiny = vec![0.0_f32; 48];
+        tiny[0] = f32::from_bits(1);
+        tiny[16] = 1.0;
+        tiny[40] = -3.0e-30;
+        assert_matches_original_algorithm(&tiny);
+        // Negative zero and exact tie values at the grid midpoints.
+        let ties: Vec<f32> = [0.25_f32, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0]
+            .iter()
+            .flat_map(|&value| [value, -value])
+            .chain([-0.0, 0.0])
+            .collect();
+        assert_matches_original_algorithm(&ties);
+    }
+
+    #[test]
+    fn production_kernel_matches_the_original_on_many_random_tensors() {
+        for seed in 100..160 {
+            let count = 16 * (1 + (seed as usize % 37)) + (seed as usize % 3) * 5;
+            assert_matches_original_algorithm(&spread_values(count, seed));
+        }
+    }
+
+    #[test]
+    fn encode_chunk_validates_alignment_and_buffer_lengths() {
+        let values = vec![1.0_f32; 32];
+        let mut packed = vec![0_u8; 16];
+        let mut scales = vec![0_u8; 2];
+        assert!(super::encode_chunk(&values, 8, 1.0, &mut packed, &mut scales).is_err());
+        assert!(super::encode_chunk(&values, 0, 1.0, &mut packed[..15], &mut scales).is_err());
+        assert!(super::encode_chunk(&values, 0, 1.0, &mut packed, &mut scales[..1]).is_err());
+        assert!(super::encode_chunk(&values, 0, 1.0, &mut packed, &mut scales).is_ok());
     }
 }
