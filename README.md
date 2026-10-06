@@ -81,12 +81,14 @@ boundary and follow-up requirements.
 Task 28 adds a SafeTensors writer for one NVFP4 matrix with three rowwise
 fields, a deterministic fixture pair, and a Python bridge pinned to Transformer
 Engine 2.19.0 for one TN GEMM (`second_operand @ weight.T`). CPU container
-validation is available; hardware compatibility is unverified because the
-required Linux Blackwell runtime has not passed. This does not add whole-model
-loading or inference, and no Level 3/4 compatibility is claimed. See
+validation is available, and the single-matrix hardware proof passed on an
+NVIDIA B200 on 2026-10-06. It establishes Level 3 runtime compatibility and
+Level 4 hardware validation only for this artifact schema, TE 2.19.0, and the
+tested operation; it does not establish whole-model compatibility or inference
+support. The GEMM's maximum absolute error was `0.000152587890625`. See
 [ADR 0013](docs/adr/0013-transformer-engine-nvfp4-runtime-container.md) and the
-[tool README](tools/transformer_engine_nvfp4/README.md) for the artifact contract
-and separate CPU/hardware commands.
+[tool README](tools/transformer_engine_nvfp4/README.md) for the tested
+environment, artifact contract, and validation commands.
 
 ## Requirements
 

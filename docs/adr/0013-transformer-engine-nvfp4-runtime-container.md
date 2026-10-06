@@ -3,13 +3,13 @@
 - Status: Accepted
 - Date: 2026-10-04
 - Scope: one rowwise NVFP4 matrix, an explicit SafeTensors container, and a pinned single-GEMM validator
-- Hardware compatibility: unverified; no Level 3 or Level 4 claim
+- Hardware compatibility: validated for the declared schema and single TN GEMM on NVIDIA B200 (Levels 3 and 4)
 
 ## Goal and context
 
 Task 28 extends the CPU profile in [ADR 0012](0012-transformer-engine-nvfp4-export-profile.md) with a deterministic serialized artifact and an optional Transformer Engine (TE) 2.19.0 bridge. The goal is to test one exported matrix in one Blackwell GEMM. This does not add whole-model loading or inference. The approved [design](../superpowers/specs/2026-10-03-transformer-engine-nvfp4-runtime-container-design.md) defines this boundary.
 
-The CPU representation and container checks are implemented. The hardware path has not executed on a compatible host: the Windows runtime attempt failed its Linux preflight. Source review and CPU tests do not establish runtime compatibility.
+The CPU representation and container checks are implemented. The explicit hardware path passed on an NVIDIA B200 on 2026-10-06. This establishes runtime and hardware compatibility only for the exact schema, TE version, and TN GEMM described here; it does not establish whole-model loading or inference.
 
 ## Accepted container contract
 
@@ -78,7 +78,24 @@ The output must have shape `[64,64]`, be finite, and satisfy `torch.testing.asse
 
 CPU checks require Rust for fixture generation and Python with NumPy and SafeTensors. Runtime validation additionally requires Linux x86_64, CUDA 12.8+, a compatible NVIDIA driver, cuDNN 9.3+, a Blackwell-or-newer GPU (compute capability 10.0+), a compatible CUDA-enabled PyTorch installation, and `transformer-engine[pytorch]==2.19.0`. See the [v2.19 installation requirements](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/docs/installation.rst) and [v2.19 tensor implementation](https://github.com/NVIDIA/TransformerEngine/blob/v2.19/transformer_engine/pytorch/tensor/nvfp4_tensor.py).
 
-The [tool README](../../tools/transformer_engine_nvfp4/README.md) gives separate CPU and hardware commands. CPU/container correctness has been checked locally. Hardware compatibility remains unverified until the explicit runtime command passes on the required host; no Level 3 runtime or Level 4 hardware compatibility is claimed. There is no whole-model loading or inference capability in this increment.
+The [tool README](../../tools/transformer_engine_nvfp4/README.md) gives separate CPU and hardware commands. The recorded B200 run establishes Level 3 runtime compatibility and Level 4 hardware validation for this single operation only. It does not cover other shapes, layouts, TE versions, hardware, or complete models.
+
+### Recorded Blackwell proof
+
+The explicit runtime command passed in a one-shot Modal container on 2026-10-06. The tested environment was:
+
+| Component | Tested version |
+| --- | --- |
+| Container image | `nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04` |
+| Python | `3.12.1` |
+| PyTorch | `2.9.0+cu128` |
+| CUDA runtime | `12.8` |
+| cuDNN | `91002` (`9.10.2`) |
+| NVIDIA driver | `580.95.05` |
+| Transformer Engine | `2.19.0` |
+| GPU | `NVIDIA B200`, compute capability `10.0` |
+
+The validator reported `max_abs_error=0.000152587890625`; the loaded weight also passed the separate TE-dequantization comparison and the GEMM output shape, finiteness, and tolerance checks. In this container, the PyTorch wheel supplied cuDNN alongside a system cuDNN installation, so the validator subprocess was directed to the PyTorch-wheel libraries through `CUDNN_HOME`, `CUDNN_PATH`, and `LD_LIBRARY_PATH`. See the tool README for the tested paths. The first attempt exposed a mixed-library symbol error; the successful run used the consistent PyTorch-wheel cuDNN path.
 
 ## Alternatives and consequences
 
@@ -88,4 +105,4 @@ The [tool README](../../tools/transformer_engine_nvfp4/README.md) gives separate
 - Adding TE/CUDA dependencies to Cargo or ordinary CPU CI was rejected; hardware validation is an explicit optional Python operation.
 - A whole-model loader was excluded because architecture, activations, and inference exceed this single-matrix boundary.
 
-The artifact is explicit, deterministic, and CPU-testable independently of GPU libraries. Existing native formats and the INT8 CLI remain unchanged. Optional Python dependencies stay outside Cargo; no new Rust dependency or general NVFP4 CLI command is introduced. The remaining acceptance gap is execution of the pinned TE/CUDA path on supported hardware.
+The artifact is explicit, deterministic, and CPU-testable independently of GPU libraries. Existing native formats and the INT8 CLI remain unchanged. Optional Python dependencies stay outside Cargo; no new Rust dependency or general NVFP4 CLI command is introduced. Whole-model loading, inference, other GEMM shapes/layouts, and other TE releases remain outside this validated boundary.
