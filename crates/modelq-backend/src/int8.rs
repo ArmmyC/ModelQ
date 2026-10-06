@@ -35,11 +35,15 @@ use modelq_quant::{
 
 use crate::{
     cpu::{MAX_WORKERS, ParallelConfig},
+    prefetch::{Feed, with_feed},
     schedule::{self, RANGES_PER_WORKER, WorkerPanicked},
 };
 
-/// Default values per chunk (4,194,304 values: 16 MiB of `f32`).
-pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 22;
+/// Default values per chunk (2,097,152 values: 8 MiB of `f32`).
+///
+/// With the reader thread of [`crate::prefetch`] a smaller chunk gives a finer
+/// pipeline and smaller buffers; measured best between 1M and 4M values.
+pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 21;
 
 /// Values per error-sum block; the unit of deterministic summation.
 pub const METRICS_BLOCK_ELEMENTS: usize = 4096;
@@ -137,20 +141,31 @@ where
         .map_err(|WorkerPanicked| Int8ParallelError::WorkerPanicked)
 }
 
-/// Computes the tensor scale from the largest absolute value over all
-/// chunks, reporting the first non-finite value by tensor-wide index.
-fn scale_pass<F, I, E>(values: &mut F, settings: &Settings) -> Result<f32, Int8ParallelError<E>>
+fn panicked<E>(_: WorkerPanicked) -> Int8ParallelError<E> {
+    Int8ParallelError::WorkerPanicked
+}
+
+/// Whether a reader thread should prefetch chunks: only with more than one
+/// worker and a source known to span at least two chunks, so small tensors
+/// start no extra thread.  The source length comes from the iterator's
+/// `size_hint`; an unknown length reads inline.
+fn should_overlap<F, I>(values: &mut F, settings: &Settings) -> bool
 where
     F: FnMut() -> I,
     I: IntoIterator<Item = f32>,
 {
+    settings.workers > 1 && values().into_iter().size_hint().0 > settings.chunk_values
+}
+
+/// Computes the tensor scale from the largest absolute value over all
+/// chunks, reporting the first non-finite value by tensor-wide index.
+fn scale_pass<E>(feed: &mut dyn Feed, settings: &Settings) -> Result<f32, Int8ParallelError<E>> {
     let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values);
-    let mut source = values().into_iter();
     let mut max_abs = 0.0_f32;
     let mut seen = 0_usize;
+    feed.start_pass();
     loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(settings.chunk_values));
+        feed.fill(&mut buffer).map_err(panicked)?;
         if buffer.is_empty() {
             break;
         }
@@ -182,40 +197,50 @@ pub fn quantize_replay_chunks<F, I, C, E>(
     mut emit: C,
 ) -> Result<f32, Int8ParallelError<E>>
 where
-    F: FnMut() -> I,
+    F: FnMut() -> I + Send,
     I: IntoIterator<Item = f32>,
     C: FnMut(&[i8]) -> Result<(), E>,
 {
     let settings = settings(config)?;
-    let scale = scale_pass(&mut values, &settings)?;
+    let overlap = should_overlap(&mut values, &settings);
+    with_feed(
+        values,
+        settings.chunk_values,
+        settings.chunk_values,
+        2,
+        overlap,
+        |feed| -> Result<f32, Int8ParallelError<E>> {
+            let scale = scale_pass(feed, &settings)?;
 
-    let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values);
-    let mut quantized: Vec<i8> = Vec::with_capacity(settings.chunk_values);
-    let mut source = values().into_iter();
-    let mut start = 0_usize;
-    loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(settings.chunk_values));
-        if buffer.is_empty() {
-            break;
-        }
-        quantized.resize(buffer.len(), 0);
-        let per_range = range_len(buffer.len(), settings.workers);
-        let first_index = start;
-        let items: Vec<_> = buffer
-            .chunks(per_range)
-            .zip(quantized.chunks_mut(per_range))
-            .collect();
-        let results = run_all(items, settings.workers, |index, (range, output)| {
-            quantize_chunk_into(range, scale, first_index + index * per_range, output)
-        })?;
-        for result in results {
-            result.map_err(Int8ParallelError::Quantization)?;
-        }
-        start += buffer.len();
-        emit(&quantized).map_err(Int8ParallelError::Callback)?;
-    }
-    Ok(scale)
+            let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values);
+            let mut quantized: Vec<i8> = Vec::with_capacity(settings.chunk_values);
+            let mut start = 0_usize;
+            feed.start_pass();
+            loop {
+                feed.fill(&mut buffer).map_err(panicked)?;
+                if buffer.is_empty() {
+                    break;
+                }
+                quantized.resize(buffer.len(), 0);
+                let per_range = range_len(buffer.len(), settings.workers);
+                let first_index = start;
+                let items: Vec<_> = buffer
+                    .chunks(per_range)
+                    .zip(quantized.chunks_mut(per_range))
+                    .collect();
+                let results = run_all(items, settings.workers, |index, (range, output)| {
+                    quantize_chunk_into(range, scale, first_index + index * per_range, output)
+                })?;
+                for result in results {
+                    result.map_err(Int8ParallelError::Quantization)?;
+                }
+                start += buffer.len();
+                emit(&quantized).map_err(Int8ParallelError::Callback)?;
+            }
+            Ok(scale)
+        },
+    )
+    .map_err(panicked)?
 }
 
 /// Per-block partial results of the diagnostics pass.
@@ -236,70 +261,82 @@ pub fn tensor_diagnostics_replay<F, I>(
     scale_bytes: u64,
 ) -> Result<(f32, TensorDiagnostics), Int8ParallelError<std::convert::Infallible>>
 where
-    F: FnMut() -> I,
+    F: FnMut() -> I + Send,
     I: IntoIterator<Item = f32>,
 {
     let settings = settings(config)?;
-    let scale = scale_pass(&mut values, &settings)?;
+    let overlap = should_overlap(&mut values, &settings);
+    let (scale, total, saturated_values, start) = with_feed(
+        values,
+        settings.chunk_values,
+        settings.chunk_values,
+        2,
+        overlap,
+        |feed| -> Result<_, Int8ParallelError<std::convert::Infallible>> {
+            let scale = scale_pass(feed, &settings)?;
 
-    let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values);
-    let mut quantized: Vec<i8> = Vec::with_capacity(settings.chunk_values);
-    let mut total = MetricsAccumulator::default();
-    let mut saturated_values = 0_u64;
-    let mut source = values().into_iter();
-    let mut start = 0_usize;
-    loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(settings.chunk_values));
-        if buffer.is_empty() {
-            break;
-        }
-        quantized.resize(buffer.len(), 0);
-        let per_range = range_len(buffer.len(), settings.workers);
-        let first_index = start;
-        let items: Vec<_> = buffer
-            .chunks(per_range)
-            .zip(quantized.chunks_mut(per_range))
-            .collect();
-        let results = run_all(items, settings.workers, |index, (range, output)| {
-            let range_start = first_index + index * per_range;
-            quantize_chunk_into(range, scale, range_start, output)
-                .map_err(Int8ParallelError::Quantization)?;
-            let mut partials = Vec::new();
-            for (block, (values, quantized)) in range
-                .chunks(METRICS_BLOCK_ELEMENTS)
-                .zip(output.chunks(METRICS_BLOCK_ELEMENTS))
-                .enumerate()
-            {
-                let block_start = range_start + block * METRICS_BLOCK_ELEMENTS;
-                let mut partial = BlockPartial::default();
-                for (offset, (&source_value, &quantized_value)) in
-                    values.iter().zip(quantized).enumerate()
-                {
-                    partial
-                        .metrics
-                        .push_at(
-                            block_start + offset,
-                            source_value,
-                            f32::from(quantized_value) * scale,
-                        )
-                        .map_err(Int8ParallelError::Diagnostics)?;
-                    if quantized_value == SYMMETRIC_MIN || quantized_value == SYMMETRIC_MAX {
-                        partial.saturated += 1;
+            let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values);
+            let mut quantized: Vec<i8> = Vec::with_capacity(settings.chunk_values);
+            let mut total = MetricsAccumulator::default();
+            let mut saturated_values = 0_u64;
+            let mut start = 0_usize;
+            feed.start_pass();
+            loop {
+                feed.fill(&mut buffer).map_err(panicked)?;
+                if buffer.is_empty() {
+                    break;
+                }
+                quantized.resize(buffer.len(), 0);
+                let per_range = range_len(buffer.len(), settings.workers);
+                let first_index = start;
+                let items: Vec<_> = buffer
+                    .chunks(per_range)
+                    .zip(quantized.chunks_mut(per_range))
+                    .collect();
+                let results = run_all(items, settings.workers, |index, (range, output)| {
+                    let range_start = first_index + index * per_range;
+                    quantize_chunk_into(range, scale, range_start, output)
+                        .map_err(Int8ParallelError::Quantization)?;
+                    let mut partials = Vec::new();
+                    for (block, (values, quantized)) in range
+                        .chunks(METRICS_BLOCK_ELEMENTS)
+                        .zip(output.chunks(METRICS_BLOCK_ELEMENTS))
+                        .enumerate()
+                    {
+                        let block_start = range_start + block * METRICS_BLOCK_ELEMENTS;
+                        let mut partial = BlockPartial::default();
+                        for (offset, (&source_value, &quantized_value)) in
+                            values.iter().zip(quantized).enumerate()
+                        {
+                            partial
+                                .metrics
+                                .push_at(
+                                    block_start + offset,
+                                    source_value,
+                                    f32::from(quantized_value) * scale,
+                                )
+                                .map_err(Int8ParallelError::Diagnostics)?;
+                            if quantized_value == SYMMETRIC_MIN || quantized_value == SYMMETRIC_MAX
+                            {
+                                partial.saturated += 1;
+                            }
+                        }
+                        partials.push(partial);
+                    }
+                    Ok::<_, Int8ParallelError<std::convert::Infallible>>(partials)
+                })?;
+                for result in results {
+                    for partial in result? {
+                        total.merge(&partial.metrics);
+                        saturated_values += partial.saturated;
                     }
                 }
-                partials.push(partial);
+                start += buffer.len();
             }
-            Ok::<_, Int8ParallelError<std::convert::Infallible>>(partials)
-        })?;
-        for result in results {
-            for partial in result? {
-                total.merge(&partial.metrics);
-                saturated_values += partial.saturated;
-            }
-        }
-        start += buffer.len();
-    }
+            Ok((scale, total, saturated_values, start))
+        },
+    )
+    .map_err(panicked)??;
 
     let quantized_payload_bytes = u64::try_from(start)
         .map_err(|_| Int8ParallelError::Diagnostics(DiagnosticsError::ElementCountOverflow))?;
@@ -335,7 +372,7 @@ pub fn validate_and_measure<F, I>(
     config: ParallelConfig,
 ) -> Result<(ReconstructionMetrics, u64), Int8ParallelError<std::convert::Infallible>>
 where
-    F: FnMut() -> I,
+    F: FnMut() -> I + Send,
     I: IntoIterator<Item = f32>,
 {
     let settings = settings(config)?;
@@ -368,73 +405,97 @@ where
         check.map_err(Int8ParallelError::Quantization)?;
     }
 
-    let mut buffer: Vec<f32> = Vec::with_capacity(settings.chunk_values.min(quantized.len()));
-    let mut total = MetricsAccumulator::default();
-    let mut saturated_values = 0_u64;
-    let mut source = values().into_iter();
-    let mut start = 0_usize;
-    loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(settings.chunk_values));
-        if buffer.is_empty() {
-            break;
-        }
-        let end = start + buffer.len();
-        let Some(chunk_quantized) = quantized.get(start..end) else {
-            let source_len = start + buffer.len() + source.by_ref().count();
-            return Err(Int8ParallelError::Diagnostics(
-                DiagnosticsError::LengthMismatch {
-                    source_len,
-                    reconstructed_len: quantized.len(),
-                },
-            ));
-        };
-        let per_range = range_len(buffer.len(), settings.workers);
-        let first_index = start;
-        let items: Vec<_> = buffer
-            .chunks(per_range)
-            .zip(chunk_quantized.chunks(per_range))
-            .collect();
-        let results = run_all(items, settings.workers, |index, (range, bytes)| {
-            let range_start = first_index + index * per_range;
-            let mut partials = Vec::new();
-            for (block, (values, bytes)) in range
-                .chunks(METRICS_BLOCK_ELEMENTS)
-                .zip(bytes.chunks(METRICS_BLOCK_ELEMENTS))
-                .enumerate()
-            {
-                let block_start = range_start + block * METRICS_BLOCK_ELEMENTS;
-                let mut partial = BlockPartial::default();
-                for (offset, (&source_value, &byte)) in values.iter().zip(bytes).enumerate() {
-                    let value = byte as i8;
-                    partial
-                        .metrics
-                        .push_at(block_start + offset, source_value, f32::from(value) * scale)
-                        .map_err(Int8ParallelError::Diagnostics)?;
-                    if value == SYMMETRIC_MIN || value == SYMMETRIC_MAX {
-                        partial.saturated += 1;
+    let overlap = should_overlap(&mut values, &settings);
+    let capacity = settings.chunk_values.min(quantized.len());
+    let (total, saturated_values) = with_feed(
+        values,
+        settings.chunk_values,
+        capacity,
+        1,
+        overlap,
+        |feed| -> Result<_, Int8ParallelError<std::convert::Infallible>> {
+            let mut buffer: Vec<f32> = Vec::with_capacity(capacity);
+            let mut total = MetricsAccumulator::default();
+            let mut saturated_values = 0_u64;
+            let mut start = 0_usize;
+            feed.start_pass();
+            loop {
+                feed.fill(&mut buffer).map_err(panicked)?;
+                if buffer.is_empty() {
+                    break;
+                }
+                let end = start + buffer.len();
+                let Some(chunk_quantized) = quantized.get(start..end) else {
+                    let mut source_len = end;
+                    loop {
+                        feed.fill(&mut buffer).map_err(panicked)?;
+                        if buffer.is_empty() {
+                            break;
+                        }
+                        source_len += buffer.len();
+                    }
+                    return Err(Int8ParallelError::Diagnostics(
+                        DiagnosticsError::LengthMismatch {
+                            source_len,
+                            reconstructed_len: quantized.len(),
+                        },
+                    ));
+                };
+                let per_range = range_len(buffer.len(), settings.workers);
+                let first_index = start;
+                let items: Vec<_> = buffer
+                    .chunks(per_range)
+                    .zip(chunk_quantized.chunks(per_range))
+                    .collect();
+                let results = run_all(items, settings.workers, |index, (range, bytes)| {
+                    let range_start = first_index + index * per_range;
+                    let mut partials = Vec::new();
+                    for (block, (values, bytes)) in range
+                        .chunks(METRICS_BLOCK_ELEMENTS)
+                        .zip(bytes.chunks(METRICS_BLOCK_ELEMENTS))
+                        .enumerate()
+                    {
+                        let block_start = range_start + block * METRICS_BLOCK_ELEMENTS;
+                        let mut partial = BlockPartial::default();
+                        for (offset, (&source_value, &byte)) in values.iter().zip(bytes).enumerate()
+                        {
+                            let value = byte as i8;
+                            partial
+                                .metrics
+                                .push_at(
+                                    block_start + offset,
+                                    source_value,
+                                    f32::from(value) * scale,
+                                )
+                                .map_err(Int8ParallelError::Diagnostics)?;
+                            if value == SYMMETRIC_MIN || value == SYMMETRIC_MAX {
+                                partial.saturated += 1;
+                            }
+                        }
+                        partials.push(partial);
+                    }
+                    Ok::<_, Int8ParallelError<std::convert::Infallible>>(partials)
+                })?;
+                for result in results {
+                    for partial in result? {
+                        total.merge(&partial.metrics);
+                        saturated_values += partial.saturated;
                     }
                 }
-                partials.push(partial);
+                start = end;
             }
-            Ok::<_, Int8ParallelError<std::convert::Infallible>>(partials)
-        })?;
-        for result in results {
-            for partial in result? {
-                total.merge(&partial.metrics);
-                saturated_values += partial.saturated;
+            if start != quantized.len() {
+                return Err(Int8ParallelError::Diagnostics(
+                    DiagnosticsError::LengthMismatch {
+                        source_len: start,
+                        reconstructed_len: quantized.len(),
+                    },
+                ));
             }
-        }
-        start = end;
-    }
-    if start != quantized.len() {
-        return Err(Int8ParallelError::Diagnostics(
-            DiagnosticsError::LengthMismatch {
-                source_len: start,
-                reconstructed_len: quantized.len(),
-            },
-        ));
-    }
+            Ok((total, saturated_values))
+        },
+    )
+    .map_err(panicked)??;
 
     let metrics = total.finish().map_err(Int8ParallelError::Diagnostics)?;
     Ok((metrics, saturated_values))
@@ -714,5 +775,79 @@ mod tests {
         )
         .expect_err("callback failure is surfaced");
         assert!(matches!(error, Int8ParallelError::Callback("sink failed")));
+    }
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::{METRICS_BLOCK_ELEMENTS, quantize_replay_chunks, tensor_diagnostics_replay};
+    use crate::cpu::ParallelConfig;
+
+    fn values(count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|index| ((index as f32) * 0.37).sin() * (1.0 + (index % 13) as f32))
+            .collect()
+    }
+
+    fn quantize(
+        source: impl Fn() -> Box<dyn Iterator<Item = f32> + Send> + Send,
+        workers: usize,
+    ) -> (Vec<i8>, f32) {
+        let mut bytes = Vec::new();
+        let scale = quantize_replay_chunks(
+            source,
+            ParallelConfig::new(workers, METRICS_BLOCK_ELEMENTS),
+            |chunk| -> Result<(), ()> {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .expect("quantizes");
+        (bytes, scale)
+    }
+
+    #[test]
+    fn a_prefetching_run_equals_an_inline_run() {
+        // An exact-size source over many chunks is prefetched when workers
+        // > 1; a filtered source has an unknown length and reads inline.
+        let data = values(60_000);
+        let exact = |workers| {
+            let data = data.clone();
+            quantize(move || Box::new(data.clone().into_iter()), workers)
+        };
+        let unknown = |workers| {
+            let data = data.clone();
+            quantize(
+                move || Box::new(data.clone().into_iter().filter(|_| true)),
+                workers,
+            )
+        };
+        let reference = exact(1);
+        for workers in [2, 8] {
+            assert_eq!(exact(workers), reference, "exact, workers={workers}");
+            assert_eq!(unknown(workers), reference, "unknown, workers={workers}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_unchanged_by_prefetching() {
+        let data = values(80_000);
+        let run = |workers| {
+            tensor_diagnostics_replay(
+                || data.iter().copied(),
+                ParallelConfig::new(workers, METRICS_BLOCK_ELEMENTS),
+                (data.len() * 4) as u64,
+                4,
+            )
+            .expect("diagnostics succeed")
+        };
+        let (scale, reference) = run(1);
+        for workers in [2, 8] {
+            let (parallel_scale, parallel) = run(workers);
+            assert_eq!(parallel_scale.to_bits(), scale.to_bits());
+            assert_eq!(parallel.mse.to_bits(), reference.mse.to_bits());
+            assert_eq!(parallel.mae.to_bits(), reference.mae.to_bits());
+            assert_eq!(parallel.saturated_values, reference.saturated_values);
+        }
     }
 }

@@ -7,4 +7,5 @@
 pub mod cpu;
 pub mod int8;
 pub mod nvfp4;
+mod prefetch;
 mod schedule;

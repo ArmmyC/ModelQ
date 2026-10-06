@@ -196,3 +196,58 @@ fn a_non_finite_input_still_fails_without_output_in_parallel() {
     assert!(!result.status.success());
     assert!(!output.exists());
 }
+
+#[test]
+fn int8_writer_output_is_identical_with_prefetching_on_small_chunks() {
+    use modelq::{
+        backend::cpu::ParallelConfig,
+        io::{
+            layout::plan_output_layout,
+            safetensors::{MappedSafetensors, TensorSource},
+            writer::{Int8Execution, write_safetensors, write_safetensors_with},
+        },
+        quant::policy::{QuantizationPolicy, TensorCandidate},
+    };
+
+    let dir = TestDir::new("writer");
+    let source_path = dir.join("source.safetensors");
+    write_source(&source_path);
+    let source = MappedSafetensors::open(&source_path).unwrap();
+    let summaries = source.tensor_summaries();
+    let candidates: Vec<_> = summaries
+        .iter()
+        .map(|summary| {
+            let elements = summary.shape.iter().product();
+            if summary.dtype == "F32" {
+                TensorCandidate::floating(summary.name.clone(), elements)
+            } else {
+                TensorCandidate::non_floating(summary.name.clone(), elements)
+            }
+        })
+        .collect();
+    let decisions = QuantizationPolicy::default().decide_all(candidates);
+    let plan = plan_output_layout(&summaries, &decisions).unwrap();
+
+    let reference = dir.join("reference.safetensors");
+    write_safetensors(&source, &plan, &decisions, &reference).unwrap();
+    let expected = fs::read(&reference).unwrap();
+
+    // 4096-value chunks over 44,800 and 8,320 elements force many chunks, so
+    // with more than one worker the source is read by a reader thread.
+    for (workers, chunk_elements) in [(1, 4096), (2, 4096), (5, 8192), (18, 4096)] {
+        let path = dir.join(&format!("out-{workers}-{chunk_elements}.safetensors"));
+        write_safetensors_with(
+            &source,
+            &plan,
+            &decisions,
+            &path,
+            Int8Execution::Parallel(ParallelConfig::new(workers, chunk_elements)),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            expected,
+            "workers={workers} chunk_elements={chunk_elements}"
+        );
+    }
+}
