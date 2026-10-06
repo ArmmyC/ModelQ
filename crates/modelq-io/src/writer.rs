@@ -21,6 +21,11 @@ use serde_json::Value;
 use crate::{
     layout::{LayoutError, OutputLayoutPlan, OutputTensorRole, plan_output_layout},
     safetensors::{SafetensorsError, TensorSource, TensorSummary},
+    transformer_engine::{
+        TRANSFORMER_ENGINE_NVFP4_BLOCK_SIZE, TRANSFORMER_ENGINE_NVFP4_PROFILE,
+        TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT,
+        TRANSFORMER_ENGINE_NVFP4_SCALE_ROW_ALIGNMENT, TransformerEngineNvfp4Tensor,
+    },
 };
 use modelq_quant::{
     int8::{DEFAULT_CHUNK_ELEMENTS, Int8Error, QuantizationStreamError, quantize_replay_chunks},
@@ -91,6 +96,8 @@ pub enum WriterError {
     },
     /// A scale tensor appeared without its preceding quantized payload.
     MissingScale { tensor_name: String },
+    /// A public Transformer Engine profile buffer failed validation.
+    InvalidTransformerEngineNvfp4Tensor { message: String },
 }
 
 impl fmt::Display for WriterError {
@@ -170,6 +177,12 @@ impl fmt::Display for WriterError {
                 formatter,
                 "quantization scale for source tensor {tensor_name:?} was not produced"
             ),
+            Self::InvalidTransformerEngineNvfp4Tensor { message } => {
+                write!(
+                    formatter,
+                    "invalid Transformer Engine NVFP4 tensor: {message}"
+                )
+            }
         }
     }
 }
@@ -248,6 +261,316 @@ pub fn write_safetensors(
     fs::rename(&temporary_path, &destination).map_err(|source| io_error(&destination, source))?;
     temporary.committed = true;
     Ok(())
+}
+
+fn publish_nvfp4_output(temporary_path: &Path, destination: &Path) -> Result<(), WriterError> {
+    match fs::hard_link(temporary_path, destination) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            Err(WriterError::DestinationExists {
+                path: destination.to_owned(),
+            })
+        }
+        Err(source) => Err(io_error(destination, source)),
+    }
+}
+
+/// Writes a validated Transformer Engine NVFP4 rowwise profile as SafeTensors.
+///
+/// The profile buffers are checked before the destination is touched. The
+/// output uses deterministic metadata and contiguous lexicographically ordered
+/// tensor records, and is committed through the writer's atomic temporary-file
+/// path.
+pub fn write_transformer_engine_nvfp4_safetensors(
+    profile: &TransformerEngineNvfp4Tensor,
+    destination: impl AsRef<Path>,
+) -> Result<(), WriterError> {
+    validate_transformer_engine_nvfp4_profile(profile)?;
+    let destination = destination.as_ref().to_owned();
+    if destination.file_name().is_none() {
+        return Err(WriterError::InvalidDestination { path: destination });
+    }
+    if destination.exists() {
+        return Err(WriterError::DestinationExists { path: destination });
+    }
+
+    let header = build_transformer_engine_nvfp4_header(profile)?;
+    let (temporary_path, mut file) = create_temporary_file(&destination)?;
+    let _temporary = TemporaryOutput::new(temporary_path.clone());
+    let write_result = (|| {
+        file.write_all(&header)
+            .map_err(|source| io_error(&destination, source))?;
+        file.write_all(&profile.amax_rowwise.to_le_bytes())
+            .map_err(|source| io_error(&destination, source))?;
+        file.write_all(&profile.rowwise_data)
+            .map_err(|source| io_error(&destination, source))?;
+        file.write_all(&profile.rowwise_scale_inv)
+            .map_err(|source| io_error(&destination, source))?;
+        file.sync_all()
+            .map_err(|source| io_error(&destination, source))
+    })();
+    drop(file);
+    write_result?;
+    publish_nvfp4_output(&temporary_path, &destination)?;
+    Ok(())
+}
+
+fn invalid_profile(field: &str, detail: impl fmt::Display) -> WriterError {
+    WriterError::InvalidTransformerEngineNvfp4Tensor {
+        message: format!("{field}: {detail}"),
+    }
+}
+
+fn validate_transformer_engine_nvfp4_profile(
+    profile: &TransformerEngineNvfp4Tensor,
+) -> Result<(), WriterError> {
+    if profile.name.trim().is_empty() || profile.name == RESERVED_METADATA_NAME {
+        return Err(invalid_profile(
+            "name",
+            "must be non-empty and not reserved",
+        ));
+    }
+    if profile.source_shape.len() != 2 {
+        return Err(invalid_profile("source_shape", "must have rank two"));
+    }
+    let [rows, columns] = [profile.source_shape[0], profile.source_shape[1]];
+    if rows == 0 || columns == 0 {
+        return Err(invalid_profile(
+            "source_shape",
+            "dimensions must be positive",
+        ));
+    }
+    if columns % TRANSFORMER_ENGINE_NVFP4_BLOCK_SIZE != 0 {
+        return Err(invalid_profile("source_shape", "K must be divisible by 16"));
+    }
+    let packed_columns = columns / 2;
+    let expected_data_len = rows.checked_mul(packed_columns).ok_or_else(|| {
+        invalid_profile("rowwise_data length", "derived element count overflowed")
+    })?;
+    let blocks_per_row = columns / TRANSFORMER_ENGINE_NVFP4_BLOCK_SIZE;
+    let padded_rows = round_up_checked(rows, TRANSFORMER_ENGINE_NVFP4_SCALE_ROW_ALIGNMENT)
+        .ok_or_else(|| invalid_profile("rowwise_scale_inv_shape", "row alignment overflowed"))?;
+    let padded_blocks = round_up_checked(
+        blocks_per_row,
+        TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT,
+    )
+    .ok_or_else(|| invalid_profile("rowwise_scale_inv_shape", "column alignment overflowed"))?;
+    let expected_scale_len = padded_rows.checked_mul(padded_blocks).ok_or_else(|| {
+        invalid_profile(
+            "rowwise_scale_inv length",
+            "derived element count overflowed",
+        )
+    })?;
+    if profile.rowwise_data_shape != [rows, packed_columns] {
+        return Err(invalid_profile(
+            "rowwise_data_shape",
+            format!("expected [{rows}, {packed_columns}]"),
+        ));
+    }
+    if profile.rowwise_data.len() != expected_data_len {
+        return Err(invalid_profile(
+            "rowwise_data length",
+            format!(
+                "expected {expected_data_len}, got {}",
+                profile.rowwise_data.len()
+            ),
+        ));
+    }
+    if profile.rowwise_scale_inv_shape != [padded_rows, padded_blocks] {
+        return Err(invalid_profile(
+            "rowwise_scale_inv_shape",
+            format!("expected [{padded_rows}, {padded_blocks}]"),
+        ));
+    }
+    if profile.rowwise_scale_inv.len() != expected_scale_len {
+        return Err(invalid_profile(
+            "rowwise_scale_inv length",
+            format!(
+                "expected {expected_scale_len}, got {}",
+                profile.rowwise_scale_inv.len()
+            ),
+        ));
+    }
+    let mut logical_scales_are_zero = true;
+    for row in 0..padded_rows {
+        for col in 0..padded_blocks {
+            let value = profile.rowwise_scale_inv[row * padded_blocks + col];
+            if row >= rows || col >= blocks_per_row {
+                if value != 0 {
+                    return Err(invalid_profile(
+                        "rowwise_scale_inv",
+                        format!("padding byte ({row}, {col}) is nonzero"),
+                    ));
+                }
+            } else if value != 0 {
+                logical_scales_are_zero = false;
+            }
+        }
+    }
+    if !profile.amax_rowwise.is_finite() {
+        return Err(invalid_profile("amax_rowwise", "must be finite"));
+    }
+    if (logical_scales_are_zero && profile.amax_rowwise != 0.0)
+        || (!logical_scales_are_zero && profile.amax_rowwise <= 0.0)
+    {
+        return Err(invalid_profile(
+            "amax_rowwise",
+            "must be zero exactly when logical block scales are all zero, otherwise positive",
+        ));
+    }
+    Ok(())
+}
+
+fn round_up_checked(value: usize, alignment: usize) -> Option<usize> {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        Some(value)
+    } else {
+        value.checked_add(alignment - remainder)
+    }
+}
+
+fn build_transformer_engine_nvfp4_header(
+    profile: &TransformerEngineNvfp4Tensor,
+) -> Result<Vec<u8>, WriterError> {
+    let mut manifest = BTreeMap::new();
+    manifest.insert("schema_version".to_owned(), Value::from(1));
+    manifest.insert(
+        "profile_id".to_owned(),
+        Value::String(TRANSFORMER_ENGINE_NVFP4_PROFILE.to_owned()),
+    );
+    manifest.insert(
+        "runtime".to_owned(),
+        json_object(BTreeMap::from([
+            (
+                "name".to_owned(),
+                Value::String("transformer_engine".to_owned()),
+            ),
+            ("version".to_owned(), Value::String("2.19.0".to_owned())),
+        ])),
+    );
+    manifest.insert(
+        "tensor_name".to_owned(),
+        Value::String(profile.name.clone()),
+    );
+    manifest.insert(
+        "logical_shape".to_owned(),
+        json_shape(&profile.source_shape)?,
+    );
+    manifest.insert(
+        "fields".to_owned(),
+        json_object(BTreeMap::from([
+            (
+                "rowwise_data".to_owned(),
+                Value::String(profile.rowwise_data_name()),
+            ),
+            (
+                "rowwise_scale_inv".to_owned(),
+                Value::String(profile.rowwise_scale_inv_name()),
+            ),
+            (
+                "amax_rowwise".to_owned(),
+                Value::String(profile.amax_rowwise_name()),
+            ),
+        ])),
+    );
+    manifest.insert(
+        "quantization".to_owned(),
+        json_object(BTreeMap::from([
+            ("data_format".to_owned(), Value::String("E2M1".to_owned())),
+            (
+                "block_scale_format".to_owned(),
+                Value::String("E4M3".to_owned()),
+            ),
+            ("block_size".to_owned(), Value::from(16)),
+            (
+                "scaling".to_owned(),
+                Value::String("rowwise_1x16_tensor_global".to_owned()),
+            ),
+        ])),
+    );
+    manifest.insert(
+        "scale_storage".to_owned(),
+        json_object(BTreeMap::from([
+            (
+                "padding".to_owned(),
+                Value::Array(vec![
+                    Value::from(TRANSFORMER_ENGINE_NVFP4_SCALE_ROW_ALIGNMENT),
+                    Value::from(TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT),
+                ]),
+            ),
+            ("gemm_swizzled".to_owned(), Value::Bool(false)),
+        ])),
+    );
+    manifest.insert("global_scale_denominator".to_owned(), Value::from(2688.0));
+    let manifest_json = serde_json::to_string(&json_object(manifest))
+        .map_err(|source| WriterError::Serialization { source })?;
+    let metadata = json_string_map(BTreeMap::from([
+        (
+            "modelq.format".to_owned(),
+            "transformer-engine-nvfp4-safetensors-v1".to_owned(),
+        ),
+        ("modelq.manifest".to_owned(), manifest_json),
+    ]));
+    let records = [
+        (profile.amax_rowwise_name(), "F32", vec![1], 4_usize),
+        (
+            profile.rowwise_data_name(),
+            "U8",
+            profile.rowwise_data_shape.clone(),
+            profile.rowwise_data.len(),
+        ),
+        (
+            profile.rowwise_scale_inv_name(),
+            "U8",
+            profile.rowwise_scale_inv_shape.clone(),
+            profile.rowwise_scale_inv.len(),
+        ),
+    ];
+    let mut root = BTreeMap::new();
+    root.insert(RESERVED_METADATA_NAME.to_owned(), metadata);
+    let mut offset = 0_usize;
+    for (name, dtype, shape, byte_len) in records {
+        let end = offset
+            .checked_add(byte_len)
+            .ok_or(WriterError::HeaderLengthOverflow)?;
+        root.insert(
+            name,
+            json_object(BTreeMap::from([
+                (
+                    "data_offsets".to_owned(),
+                    Value::Array(vec![Value::from(offset), Value::from(end)]),
+                ),
+                ("dtype".to_owned(), Value::String(dtype.to_owned())),
+                ("shape".to_owned(), json_shape(&shape)?),
+            ])),
+        );
+        offset = end;
+    }
+    let raw_header =
+        serde_json::to_vec(&root).map_err(|source| WriterError::Serialization { source })?;
+    let padded_len = raw_header
+        .len()
+        .checked_add(HEADER_ALIGNMENT - 1)
+        .ok_or(WriterError::HeaderLengthOverflow)?
+        / HEADER_ALIGNMENT
+        * HEADER_ALIGNMENT;
+    if padded_len > MAX_HEADER_SIZE {
+        return Err(WriterError::HeaderTooLarge {
+            path: PathBuf::from("<planned output>"),
+            size: padded_len,
+        });
+    }
+    let total_header_len = HEADER_LENGTH_BYTES
+        .checked_add(padded_len)
+        .ok_or(WriterError::HeaderLengthOverflow)?;
+    let padded_len_u64 =
+        u64::try_from(padded_len).map_err(|_| WriterError::HeaderLengthOverflow)?;
+    let mut header = Vec::with_capacity(total_header_len);
+    header.extend_from_slice(&padded_len_u64.to_le_bytes());
+    header.extend_from_slice(&raw_header);
+    header.resize(total_header_len, b' ');
+    Ok(header)
 }
 
 fn build_header(
@@ -606,5 +929,58 @@ impl Drop for TemporaryOutput {
         if !self.committed {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "modelq-{label}-{}",
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn nvfp4_publication_preserves_destination_created_before_publish_and_cleans_temp() {
+        let dir = test_dir("nvfp4-publication-collision");
+        let destination = dir.join("artifact.safetensors");
+        let temporary_path = dir.join("artifact.tmp");
+        fs::write(&temporary_path, b"new output").unwrap();
+        let temporary = TemporaryOutput::new(temporary_path.clone());
+        fs::write(&destination, b"existing bytes").unwrap();
+
+        let result = publish_nvfp4_output(&temporary_path, &destination);
+
+        assert!(matches!(result, Err(WriterError::DestinationExists { .. })));
+        assert_eq!(fs::read(&destination).unwrap(), b"existing bytes");
+        drop(temporary);
+        assert!(!temporary_path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nvfp4_publication_rejects_dangling_symlink_and_cleans_temp() {
+        use std::os::unix::fs::symlink;
+
+        let dir = test_dir("nvfp4-publication-symlink");
+        let destination = dir.join("artifact.safetensors");
+        let temporary_path = dir.join("artifact.tmp");
+        fs::write(&temporary_path, b"new output").unwrap();
+        let temporary = TemporaryOutput::new(temporary_path.clone());
+        symlink(dir.join("missing-target"), &destination).unwrap();
+
+        let result = publish_nvfp4_output(&temporary_path, &destination);
+
+        assert!(matches!(result, Err(WriterError::DestinationExists { .. })));
+        assert!(fs::symlink_metadata(&destination).is_ok());
+        drop(temporary);
+        assert!(!temporary_path.exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
