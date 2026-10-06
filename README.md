@@ -141,6 +141,13 @@ benchmark the three phases together ran about 3.3x faster
 (`cargo bench --bench int8_streaming`). See
 [ADR 0018](docs/adr/0018-parallel-int8-cli.md).
 
+Task 38 overlaps reading each chunk from the checkpoint with the parallel
+quantization work (a reader thread fills the next chunk while workers process
+the current one) and moves the default chunk to 2M values. Large tensors
+convert about 20% faster at moderate worker counts with identical output. See
+[ADR 0020](docs/adr/0020-overlapped-chunk-fill.md) and, for the preceding
+scheduler change, [ADR 0019](docs/adr/0019-shared-parallel-scheduler.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

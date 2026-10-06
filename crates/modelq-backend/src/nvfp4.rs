@@ -24,14 +24,16 @@ use modelq_quant::nvfp4::{
 
 use crate::{
     cpu::{MAX_WORKERS, ParallelConfig},
+    prefetch::with_feed,
     schedule::{self, RANGES_PER_WORKER, WorkerPanicked},
 };
 
-/// Default values per chunk (4,194,304 values: 16 MiB of `f32`).
+/// Default values per chunk (2,097,152 values: 8 MiB of `f32`).
 ///
-/// Larger than the sequential default so the per-chunk thread start-up cost
-/// stays small next to the encode work.
-pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 22;
+/// With the reader thread of [`crate::prefetch`] a smaller chunk gives a finer
+/// pipeline and smaller buffers; measured best between 1M and 4M values, while
+/// still large enough that per-chunk thread start-up stays small.
+pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 21;
 
 /// Fewest blocks in a range, so a range is always worth scheduling.
 const MIN_BLOCKS_PER_RANGE: usize = 64;
@@ -88,12 +90,12 @@ impl<E: std::error::Error + 'static> std::error::Error for Nvfp4ParallelError<E>
 /// identical to [`modelq_quant::nvfp4::quantize_shaped`].
 pub fn quantize_replay_chunks<F, I, C, E>(
     shape: &[usize],
-    mut values: F,
+    values: F,
     config: ParallelConfig,
     mut emit: C,
 ) -> Result<StreamedQuantization, Nvfp4ParallelError<E>>
 where
-    F: FnMut() -> I,
+    F: FnMut() -> I + Send,
     I: IntoIterator<Item = f32>,
     C: FnMut(&[u8]) -> Result<(), E>,
 {
@@ -108,53 +110,69 @@ where
     let workers = config.workers.min(MAX_WORKERS);
     let chunk_values = config.chunk_elements / BLOCK_SIZE * BLOCK_SIZE;
     let buffer_capacity = chunk_values.min(expected);
-    let mut buffer: Vec<f32> = Vec::with_capacity(buffer_capacity);
+    // Reading the source is serial.  With more than one worker and at least
+    // two chunks, a reader thread fills the next chunk while the workers
+    // process the current one; smaller jobs read inline and start no thread.
+    let overlap = workers > 1 && expected > chunk_values;
 
-    // Pass 1: tensor-wide amax, with the first non-finite value reported by
-    // its tensor-wide index.
-    let mut global_amax = 0.0_f32;
-    let mut seen = 0_usize;
-    let mut source = values().into_iter();
-    loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(chunk_values));
-        if buffer.is_empty() {
-            break;
-        }
-        global_amax = global_amax.max(parallel_amax(&buffer, seen, workers)?);
-        seen += buffer.len();
-    }
-    if seen != expected {
-        return Err(fail(Nvfp4Error::ShapeLengthMismatch {
-            expected,
-            actual: seen,
-        }));
-    }
+    let (global_amax, block_scales) = with_feed(
+        values,
+        chunk_values,
+        buffer_capacity,
+        2,
+        overlap,
+        |feed| -> Result<(f32, Vec<u8>), Nvfp4ParallelError<E>> {
+            let mut buffer: Vec<f32> = Vec::with_capacity(buffer_capacity);
+            let panicked = |WorkerPanicked| Nvfp4ParallelError::WorkerPanicked;
 
-    // Pass 2: encode each chunk across the workers and emit in order.
-    let mut packed: Vec<u8> = Vec::with_capacity(packed_len(buffer_capacity));
-    let mut block_scales = vec![0_u8; block_count(expected)];
-    let mut start = 0_usize;
-    let mut source = values().into_iter();
-    loop {
-        buffer.clear();
-        buffer.extend(source.by_ref().take(chunk_values));
-        if buffer.is_empty() {
-            break;
-        }
-        let first_block = start / BLOCK_SIZE;
-        let scales = &mut block_scales[first_block..first_block + block_count(buffer.len())];
-        packed.resize(packed_len(buffer.len()), 0);
-        parallel_encode(&buffer, start, global_amax, &mut packed, scales, workers)?;
-        start += buffer.len();
-        emit(&packed).map_err(Nvfp4ParallelError::Callback)?;
-    }
-    if start != expected {
-        return Err(fail(Nvfp4Error::ShapeLengthMismatch {
-            expected,
-            actual: start,
-        }));
-    }
+            // Pass 1: tensor-wide amax, with the first non-finite value
+            // reported by its tensor-wide index.
+            let mut global_amax = 0.0_f32;
+            let mut seen = 0_usize;
+            feed.start_pass();
+            loop {
+                feed.fill(&mut buffer).map_err(panicked)?;
+                if buffer.is_empty() {
+                    break;
+                }
+                global_amax = global_amax.max(parallel_amax(&buffer, seen, workers)?);
+                seen += buffer.len();
+            }
+            if seen != expected {
+                return Err(fail(Nvfp4Error::ShapeLengthMismatch {
+                    expected,
+                    actual: seen,
+                }));
+            }
+
+            // Pass 2: encode each chunk across the workers and emit in order.
+            let mut packed: Vec<u8> = Vec::with_capacity(packed_len(buffer_capacity));
+            let mut block_scales = vec![0_u8; block_count(expected)];
+            let mut start = 0_usize;
+            feed.start_pass();
+            loop {
+                feed.fill(&mut buffer).map_err(panicked)?;
+                if buffer.is_empty() {
+                    break;
+                }
+                let first_block = start / BLOCK_SIZE;
+                let scales =
+                    &mut block_scales[first_block..first_block + block_count(buffer.len())];
+                packed.resize(packed_len(buffer.len()), 0);
+                parallel_encode(&buffer, start, global_amax, &mut packed, scales, workers)?;
+                start += buffer.len();
+                emit(&packed).map_err(Nvfp4ParallelError::Callback)?;
+            }
+            if start != expected {
+                return Err(fail(Nvfp4Error::ShapeLengthMismatch {
+                    expected,
+                    actual: start,
+                }));
+            }
+            Ok((global_amax, block_scales))
+        },
+    )
+    .map_err(|WorkerPanicked| Nvfp4ParallelError::WorkerPanicked)??;
 
     Ok(StreamedQuantization::new(
         block_scales,
