@@ -124,6 +124,14 @@ for every thread count. On a 16M-value benchmark the parallel path was about
 4.6x faster with 18 workers (`cargo bench --bench nvfp4_parallel`). See
 [ADR 0016](docs/adr/0016-parallel-nvfp4.md).
 
+Task 35 makes the NVFP4 encode kernel about 7x faster on one thread with
+byte-identical output (closed-form E2M1 and E4M3 encoders, table decoders, and
+an allocation-free block kernel). It also corrects the FP4/FP8 codecs' handling
+of astronomically large magnitudes, which now saturate as documented; no value
+the NVFP4 path can produce is affected. See
+[ADR 0017](docs/adr/0017-fast-nvfp4-encode.md) and the amendment to
+[ADR 0009](docs/adr/0009-fp4-fp8-codecs.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

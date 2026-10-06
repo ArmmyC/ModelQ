@@ -72,3 +72,21 @@ This ADR does not define:
 - CUDA, Transformer Engine, TensorRT, or hardware compatibility.
 
 Those are separate representation, algorithm, container, and runtime decisions.
+
+## Amendment (Task 35): closed-form encoders and a corrected overflow case
+
+The first implementation chose the nearest finite value by searching every
+candidate and comparing `(magnitude - candidate).abs()` in F32.  Task 35
+replaced it with closed forms (threshold comparisons for E2M1; a power-of-two
+scaling and `round_ties_even` for E4M3) and table decoders, see
+[ADR 0017](0017-fast-nvfp4-encode.md).
+
+Verification against the original search found one defect in the original:
+for magnitudes around 2^26 and above (for example `3.4e38`), `magnitude -
+candidate` rounds to the same F32 for every candidate, every candidate ties,
+and the first one (zero) wins.  That contradicts the saturation this ADR
+documents.  The new encoders saturate to the signed maximum finite value, and
+the same fix was applied to E5M2, which had the identical defect.  Below 2^20
+in magnitude the new and original encoders agree exactly, which covers every
+value the NVFP4 path can produce (scaled elements are within about 6 and block
+scales within 448), so existing NVFP4 output is unchanged.
