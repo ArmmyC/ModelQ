@@ -85,7 +85,7 @@ index before returning, and exposes one tensor catalog in name order. Payloads
 are mapped per call, one shard at a time. Task 30 wires it into the CLI:
 `modelq inspect` and `modelq quantize --format int8` accept a checkpoint
 directory or index path as well as a single file. The INT8 output is still one
-SafeTensors file; output sharding and sharded NVFP4 export are not implemented.
+SafeTensors file; output sharding is not implemented.
 
 Tasks 31 and 32 add `modelq quantize --format nvfp4`, which writes the
 ModelQ-native NVFP4 container from a single or sharded checkpoint using a
