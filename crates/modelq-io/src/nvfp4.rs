@@ -1228,6 +1228,8 @@ fn invalid_manifest(message: impl Into<String>) -> Nvfp4ReaderError {
 pub enum Nvfp4WriterError {
     /// The parallel execution configuration was invalid or a worker failed.
     Execution { message: String },
+    /// The Transformer Engine layout planner rejected the plan or the source.
+    TransformerEngineLayout { message: String },
     /// The destination already exists.
     DestinationExists { path: PathBuf },
     /// The source and destination resolve to the same existing path.
@@ -1280,6 +1282,9 @@ impl fmt::Display for Nvfp4WriterError {
         match self {
             Self::Execution { message } => {
                 write!(formatter, "NVFP4 execution failed: {message}")
+            }
+            Self::TransformerEngineLayout { message } => {
+                write!(formatter, "Transformer Engine layout is invalid: {message}")
             }
             Self::DestinationExists { path } => {
                 write!(
@@ -1635,6 +1640,84 @@ fn build_header(
     Ok(header)
 }
 
+/// Streams one source tensor's packed E2M1 bytes into `file` through the
+/// sequential or parallel quantizer and returns its scales.
+///
+/// Shared by the native and Transformer Engine writers, which place exactly
+/// the same bytes; `output_name` and `expected_bytes` describe the planned
+/// destination field and are used for length checking and error reporting.
+pub(crate) fn stream_quantized_payload(
+    source: &impl TensorSource,
+    source_name: &str,
+    output_name: &str,
+    expected_bytes: u64,
+    file: &mut File,
+    output_path: &Path,
+    execution: Nvfp4Execution,
+) -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
+    source
+        .with_tensor(
+            source_name,
+            |view| -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
+                let mut written = 0_u64;
+                let mut emit = |chunk: &[u8]| {
+                    written =
+                        written.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    file.write_all(chunk)
+                        .map_err(|source| io_error(output_path, source))
+                };
+                let result = match execution {
+                    Nvfp4Execution::Sequential => nvfp4::quantize_replay_chunks(
+                        view.shape(),
+                        || view.values(),
+                        nvfp4::DEFAULT_CHUNK_BLOCKS,
+                        &mut emit,
+                    ),
+                    Nvfp4Execution::Parallel(config) => {
+                        modelq_backend::nvfp4::quantize_replay_chunks(
+                            view.shape(),
+                            || view.values(),
+                            config,
+                            &mut emit,
+                        )
+                        .map_err(|error| match error {
+                            modelq_backend::nvfp4::Nvfp4ParallelError::Quantization(source) => {
+                                nvfp4::Nvfp4StreamError::Quantization(source)
+                            }
+                            modelq_backend::nvfp4::Nvfp4ParallelError::Callback(error) => {
+                                nvfp4::Nvfp4StreamError::Callback(error)
+                            }
+                            other => {
+                                nvfp4::Nvfp4StreamError::Callback(Nvfp4WriterError::Execution {
+                                    message: other.to_string(),
+                                })
+                            }
+                        })
+                    }
+                };
+                let streamed = match result {
+                    Ok(streamed) => streamed,
+                    Err(nvfp4::Nvfp4StreamError::Quantization(source)) => {
+                        return Err(Nvfp4WriterError::Quantization {
+                            tensor_name: source_name.to_owned(),
+                            source,
+                        });
+                    }
+                    Err(nvfp4::Nvfp4StreamError::Callback(error)) => return Err(error),
+                };
+                if written != expected_bytes {
+                    return Err(Nvfp4WriterError::DataLengthMismatch {
+                        name: output_name.to_owned(),
+                        expected: expected_bytes,
+                        actual: written,
+                    });
+                }
+                Ok(streamed)
+            },
+        )
+        .map_err(|source| Nvfp4WriterError::Source { source })?
+}
+
 fn write_data(
     file: &mut File,
     output_path: &Path,
@@ -1679,69 +1762,15 @@ fn write_data(
                     .map_err(|source| Nvfp4WriterError::Source { source })??;
             }
             Nvfp4OutputRole::QuantizedData => {
-                let streamed = source
-                    .with_tensor(
-                        &tensor.source_name,
-                        |view| -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
-                            let mut written = 0_u64;
-                            let mut emit = |chunk: &[u8]| {
-                                written = written
-                                    .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                                file.write_all(chunk)
-                                    .map_err(|source| io_error(output_path, source))
-                            };
-                            let result = match execution {
-                                Nvfp4Execution::Sequential => nvfp4::quantize_replay_chunks(
-                                    view.shape(),
-                                    || view.values(),
-                                    nvfp4::DEFAULT_CHUNK_BLOCKS,
-                                    &mut emit,
-                                ),
-                                Nvfp4Execution::Parallel(config) => {
-                                    modelq_backend::nvfp4::quantize_replay_chunks(
-                                        view.shape(),
-                                        || view.values(),
-                                        config,
-                                        &mut emit,
-                                    )
-                                    .map_err(|error| {
-                                        match error {
-                                        modelq_backend::nvfp4::Nvfp4ParallelError::Quantization(
-                                            source,
-                                        ) => nvfp4::Nvfp4StreamError::Quantization(source),
-                                        modelq_backend::nvfp4::Nvfp4ParallelError::Callback(
-                                            error,
-                                        ) => nvfp4::Nvfp4StreamError::Callback(error),
-                                        other => nvfp4::Nvfp4StreamError::Callback(
-                                            Nvfp4WriterError::Execution {
-                                                message: other.to_string(),
-                                            },
-                                        ),
-                                    }
-                                    })
-                                }
-                            };
-                            let streamed = match result {
-                                Ok(streamed) => streamed,
-                                Err(nvfp4::Nvfp4StreamError::Quantization(source)) => {
-                                    return Err(Nvfp4WriterError::Quantization {
-                                        tensor_name: tensor.source_name.clone(),
-                                        source,
-                                    });
-                                }
-                                Err(nvfp4::Nvfp4StreamError::Callback(error)) => return Err(error),
-                            };
-                            if written != tensor.byte_len {
-                                return Err(Nvfp4WriterError::DataLengthMismatch {
-                                    name: tensor.name.clone(),
-                                    expected: tensor.byte_len,
-                                    actual: written,
-                                });
-                            }
-                            Ok(streamed)
-                        },
-                    )
-                    .map_err(|source| Nvfp4WriterError::Source { source })??;
+                let streamed = stream_quantized_payload(
+                    source,
+                    &tensor.source_name,
+                    &tensor.name,
+                    tensor.byte_len,
+                    file,
+                    output_path,
+                    execution,
+                )?;
                 quantized_tensors.insert(tensor.source_name.clone(), streamed);
             }
             Nvfp4OutputRole::BlockScales => {
@@ -1793,11 +1822,11 @@ fn write_payload(
         .map_err(|source| io_error(output_path, source))
 }
 
-fn json_object(entries: BTreeMap<String, Value>) -> Value {
+pub(crate) fn json_object(entries: BTreeMap<String, Value>) -> Value {
     Value::Object(entries.into_iter().collect())
 }
 
-fn json_string_map(entries: BTreeMap<String, String>) -> Value {
+pub(crate) fn json_string_map(entries: BTreeMap<String, String>) -> Value {
     let values = entries
         .into_iter()
         .map(|(key, value)| (key, Value::String(value)))
@@ -1805,11 +1834,13 @@ fn json_string_map(entries: BTreeMap<String, String>) -> Value {
     Value::Object(values)
 }
 
-fn json_shape(shape: &[usize]) -> Result<Value, Nvfp4WriterError> {
+pub(crate) fn json_shape(shape: &[usize]) -> Result<Value, Nvfp4WriterError> {
     serde_json::to_value(shape).map_err(|source| Nvfp4WriterError::Serialization { source })
 }
 
-fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), Nvfp4WriterError> {
+pub(crate) fn create_temporary_file(
+    destination: &Path,
+) -> Result<(PathBuf, File), Nvfp4WriterError> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let file_name = destination
         .file_name()
@@ -1844,14 +1875,14 @@ fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), Nvfp4Wri
     ))
 }
 
-fn io_error(path: &Path, source: io::Error) -> Nvfp4WriterError {
+pub(crate) fn io_error(path: &Path, source: io::Error) -> Nvfp4WriterError {
     Nvfp4WriterError::Io {
         path: path.to_owned(),
         source,
     }
 }
 
-fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
+pub(crate) fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
     if source == destination {
         return true;
     }
@@ -1861,13 +1892,13 @@ fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
     }
 }
 
-struct TemporaryOutput {
+pub(crate) struct TemporaryOutput {
     path: PathBuf,
-    committed: bool,
+    pub(crate) committed: bool,
 }
 
 impl TemporaryOutput {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
             committed: false,

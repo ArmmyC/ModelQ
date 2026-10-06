@@ -183,7 +183,7 @@ struct ValidationReport {
 fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
     let format = matches
         .get_one::<String>("format")
-        .ok_or_else(|| "quantize requires --format <int8|nvfp4>".to_owned())?;
+        .ok_or_else(|| "quantize requires --format <int8|nvfp4|nvfp4-te>".to_owned())?;
     let has_nvfp4_options =
         matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
     match format.as_str() {
@@ -195,7 +195,7 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
         }
-        "nvfp4" => {
+        "nvfp4" | "nvfp4-te" => {
             let (input, output) = quantize_paths(matches)?;
             require_cpu(matches)?;
             let target = output::OutputTarget::from_args(
@@ -203,6 +203,11 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                 matches.get_one::<String>("max-shard-size"),
             )?;
             let options = nvfp4_command::Nvfp4Options {
+                profile: if format == "nvfp4-te" {
+                    nvfp4_command::Nvfp4Profile::TransformerEngine
+                } else {
+                    nvfp4_command::Nvfp4Profile::Native
+                },
                 exclude: matches
                     .get_many::<String>("exclude")
                     .map(|values| values.cloned().collect())
@@ -213,7 +218,7 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             nvfp4_command::run(&input, &target, &options)
         }
         other => Err(format!(
-            "unsupported format {other:?}; supported formats are int8 and nvfp4"
+            "unsupported format {other:?}; supported formats are int8, nvfp4 and nvfp4-te"
         )),
     }
 }

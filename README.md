@@ -148,6 +148,19 @@ convert about 20% faster at moderate worker counts with identical output. See
 [ADR 0020](docs/adr/0020-overlapped-chunk-fill.md) and, for the preceding
 scheduler change, [ADR 0019](docs/adr/0019-shared-parallel-scheduler.md).
 
+Task 40 adds `modelq quantize --format nvfp4-te`, which writes many rank-two
+matrices into a Transformer Engine rowwise NVFP4 container (schema v2) with a
+manifest per file or shard, using the same bounded parallel quantizer, sharded
+input and output, and policy flags as `--format nvfp4`. Only matrices whose
+both dimensions are divisible by 16 are exported; everything else is preserved
+with a printed reason. This is **CPU-validated only**: the container's fields
+are byte-identical to the single-matrix artifact that passed on a B200, and an
+independent Python validator decodes it to the reference, but Transformer
+Engine compatibility of the multi-matrix schema has not been run on hardware
+(planned as Task 41). See
+[ADR 0021](docs/adr/0021-transformer-engine-multi-matrix-container.md) and the
+[tool README](tools/transformer_engine_nvfp4/README.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

@@ -23,6 +23,8 @@ pub const TRANSFORMER_ENGINE_NVFP4_SCALE_COLUMN_ALIGNMENT: usize = 4;
 const FP4_MAX: f32 = 6.0;
 const FP8_E4M3_MAX: f32 = 448.0;
 const GLOBAL_SCALE_DENOMINATOR: f32 = FP4_MAX * FP8_E4M3_MAX;
+/// `6 * 448`: a stored amax divided by this recovers the decode scale.
+pub const TRANSFORMER_ENGINE_NVFP4_GLOBAL_SCALE_DENOMINATOR: f32 = GLOBAL_SCALE_DENOMINATOR;
 const RESERVED_METADATA_NAME: &str = "__metadata__";
 
 /// Errors returned while adapting a native NVFP4 tensor to the profile.
