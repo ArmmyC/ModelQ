@@ -16,6 +16,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use modelq_backend::cpu::ParallelConfig;
 use serde_json::Value;
 
 use crate::{
@@ -52,6 +53,8 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// Errors returned while creating a ModelQ-native SafeTensors output.
 #[derive(Debug)]
 pub enum WriterError {
+    /// The parallel execution configuration was invalid or a worker failed.
+    Execution { message: String },
     /// The destination already exists. The writer never replaces an existing
     /// file, which keeps failed conversions from destroying prior artifacts.
     DestinationExists { path: PathBuf },
@@ -103,6 +106,9 @@ pub enum WriterError {
 impl fmt::Display for WriterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Execution { message } => {
+                write!(formatter, "INT8 execution failed: {message}")
+            }
             Self::DestinationExists { path } => {
                 write!(
                     formatter,
@@ -213,6 +219,34 @@ pub fn write_safetensors(
     decisions: &[TensorDecision],
     destination: impl AsRef<Path>,
 ) -> Result<(), WriterError> {
+    write_safetensors_with(
+        source,
+        plan,
+        decisions,
+        destination,
+        Int8Execution::Sequential,
+    )
+}
+
+/// How the writer executes INT8 quantization.
+///
+/// Both modes produce byte-identical files; `Parallel` only changes speed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Int8Execution {
+    /// The scalar streaming reference path on the calling thread.
+    Sequential,
+    /// The bounded parallel CPU path from `modelq-backend`.
+    Parallel(ParallelConfig),
+}
+
+/// Like [`write_safetensors`] with an explicit execution mode.
+pub fn write_safetensors_with(
+    source: &impl TensorSource,
+    plan: &OutputLayoutPlan,
+    decisions: &[TensorDecision],
+    destination: impl AsRef<Path>,
+    execution: Int8Execution,
+) -> Result<(), WriterError> {
     let destination = destination.as_ref().to_owned();
     if destination.file_name().is_none() {
         return Err(WriterError::InvalidDestination { path: destination });
@@ -245,7 +279,7 @@ pub fn write_safetensors(
     let write_result = (|| {
         file.write_all(&header)
             .map_err(|source| io_error(&destination, source))?;
-        write_data(&mut file, &destination, source, plan)?;
+        write_data(&mut file, &destination, source, plan, execution)?;
         file.sync_all()
             .map_err(|source| io_error(&destination, source))
     })();
@@ -700,6 +734,7 @@ fn write_data(
     output_path: &Path,
     source: &impl TensorSource,
     plan: &OutputLayoutPlan,
+    execution: Int8Execution,
 ) -> Result<(), WriterError> {
     let mut cursor = 0_u64;
     let mut scales = BTreeMap::new();
@@ -741,27 +776,50 @@ fn write_data(
                 let scale = source
                     .with_tensor(&tensor.source_name, |view| -> Result<f32, WriterError> {
                         let mut actual = 0_u64;
-                        let stream_result = quantize_replay_chunks(
-                            || view.values(),
-                            DEFAULT_CHUNK_ELEMENTS,
-                            |chunk| {
-                                let chunk_bytes = u64::try_from(chunk.len()).map_err(|_| {
-                                    WriterError::DataLengthMismatch {
-                                        name: tensor.name.clone(),
-                                        expected: tensor.byte_len,
-                                        actual: u64::MAX,
+                        let mut emit = |chunk: &[i8]| {
+                            let chunk_bytes = u64::try_from(chunk.len()).map_err(|_| {
+                                WriterError::DataLengthMismatch {
+                                    name: tensor.name.clone(),
+                                    expected: tensor.byte_len,
+                                    actual: u64::MAX,
+                                }
+                            })?;
+                            actual = actual.checked_add(chunk_bytes).ok_or_else(|| {
+                                WriterError::DataLengthMismatch {
+                                    name: tensor.name.clone(),
+                                    expected: tensor.byte_len,
+                                    actual: u64::MAX,
+                                }
+                            })?;
+                            write_i8_values(file, output_path, chunk)
+                        };
+                        let stream_result = match execution {
+                            Int8Execution::Sequential => quantize_replay_chunks(
+                                || view.values(),
+                                DEFAULT_CHUNK_ELEMENTS,
+                                &mut emit,
+                            ),
+                            Int8Execution::Parallel(config) => {
+                                modelq_backend::int8::quantize_replay_chunks(
+                                    || view.values(),
+                                    config,
+                                    &mut emit,
+                                )
+                                .map_err(|error| match error {
+                                    modelq_backend::int8::Int8ParallelError::Quantization(
+                                        source,
+                                    ) => QuantizationStreamError::Quantization(source),
+                                    modelq_backend::int8::Int8ParallelError::Callback(error) => {
+                                        QuantizationStreamError::Callback(error)
                                     }
-                                })?;
-                                actual = actual.checked_add(chunk_bytes).ok_or_else(|| {
-                                    WriterError::DataLengthMismatch {
-                                        name: tensor.name.clone(),
-                                        expected: tensor.byte_len,
-                                        actual: u64::MAX,
+                                    other => {
+                                        QuantizationStreamError::Callback(WriterError::Execution {
+                                            message: other.to_string(),
+                                        })
                                     }
-                                })?;
-                                write_i8_values(file, output_path, chunk)
-                            },
-                        );
+                                })
+                            }
+                        };
                         let scale = match stream_result {
                             Ok(scale) => scale,
                             Err(QuantizationStreamError::Quantization(source)) => {

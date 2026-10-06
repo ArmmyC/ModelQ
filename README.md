@@ -132,6 +132,15 @@ the NVFP4 path can produce is affected. See
 [ADR 0017](docs/adr/0017-fast-nvfp4-encode.md) and the amendment to
 [ADR 0009](docs/adr/0009-fp4-fp8-codecs.md).
 
+Task 36 runs the INT8 CLI path on multiple CPU threads as well: progress
+diagnostics, the writer, and post-write validation. `--threads N` now applies
+to both formats (default: all CPUs; `1` = scalar writer). The INT8 file is
+byte-identical for every thread count, and reported error metrics are too,
+because sums are accumulated over fixed 4096-value blocks. On a 16M-value
+benchmark the three phases together ran about 3.3x faster
+(`cargo bench --bench int8_streaming`). See
+[ADR 0018](docs/adr/0018-parallel-int8-cli.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

@@ -404,8 +404,15 @@ where
     ))
 }
 
-#[derive(Default)]
-struct MetricsAccumulator {
+/// Running reconstruction-error sums.
+///
+/// Floating-point addition is not associative, so the order in which values
+/// are added matters in the last bits.  The scalar functions in this module
+/// add left to right.  Parallel callers should accumulate fixed-size blocks
+/// with [`Self::push_at`], then [`Self::merge`] the blocks in index order, so
+/// the result depends only on the block size and not on how many workers ran.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MetricsAccumulator {
     elements: usize,
     squared_error_sum: f64,
     absolute_error_sum: f64,
@@ -414,12 +421,22 @@ struct MetricsAccumulator {
 }
 
 impl MetricsAccumulator {
-    fn push(
+    /// Adds one pair, reporting errors with the number of pairs seen so far.
+    pub fn push(
         &mut self,
         source_value: f32,
         reconstructed_value: f32,
     ) -> Result<(), DiagnosticsError> {
-        let index = self.elements;
+        self.push_at(self.elements, source_value, reconstructed_value)
+    }
+
+    /// Adds one pair, reporting errors with an explicit tensor-wide `index`.
+    pub fn push_at(
+        &mut self,
+        index: usize,
+        source_value: f32,
+        reconstructed_value: f32,
+    ) -> Result<(), DiagnosticsError> {
         if !source_value.is_finite() {
             return Err(DiagnosticsError::NonFiniteSource {
                 index,
@@ -444,7 +461,23 @@ impl MetricsAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> Result<ReconstructionMetrics, DiagnosticsError> {
+    /// Number of pairs added so far.
+    pub const fn elements(&self) -> usize {
+        self.elements
+    }
+
+    /// Adds another accumulator's sums to this one.  Merging block
+    /// accumulators in index order gives a worker-count-independent result.
+    pub fn merge(&mut self, other: &Self) {
+        self.elements = self.elements.saturating_add(other.elements);
+        self.squared_error_sum += other.squared_error_sum;
+        self.absolute_error_sum += other.absolute_error_sum;
+        self.source_energy += other.source_energy;
+        self.max_abs_error = self.max_abs_error.max(other.max_abs_error);
+    }
+
+    /// Converts the sums into metrics.
+    pub fn finish(self) -> Result<ReconstructionMetrics, DiagnosticsError> {
         let elements =
             u64::try_from(self.elements).map_err(|_| DiagnosticsError::ElementCountOverflow)?;
         let elements_f64 = elements as f64;
