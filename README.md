@@ -97,7 +97,7 @@ index before returning, and exposes one tensor catalog in name order. Payloads
 are mapped per call, one shard at a time. Task 30 wires it into the CLI:
 `modelq inspect` and `modelq quantize --format int8` accept a checkpoint
 directory or index path as well as a single file. The INT8 output is still one
-SafeTensors file; output sharding is not implemented.
+SafeTensors file unless `--max-shard-size` is given (Task 33).
 
 Tasks 31 and 32 add `modelq quantize --format nvfp4`, which writes the
 ModelQ-native NVFP4 container from a single or sharded checkpoint using a
@@ -108,6 +108,14 @@ printed reason, and keeps names containing `embed_tokens`, `lm_head`, or
 (`--exclude <SUBSTRING>` adds more). The output is ModelQ-native only; no
 runtime compatibility is implied. See
 [ADR 0014](docs/adr/0014-nvfp4-cli-export.md).
+
+Task 33 adds `--max-shard-size <SIZE>` (for example `500MB` or `2GiB`) to
+`modelq quantize` for both formats. `--output` then names a directory that
+receives `model-NNNNN-of-MMMMM.safetensors` shards and a
+`model.safetensors.index.json` that the sharded reader accepts. A tensor and
+its scales are never split across shards, a failed run removes everything it
+created, and the tensors match the single-file output byte for byte. See
+[ADR 0015](docs/adr/0015-sharded-output.md).
 
 ## Requirements
 

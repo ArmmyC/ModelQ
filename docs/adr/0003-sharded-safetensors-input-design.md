@@ -161,6 +161,8 @@ ModelQ to silently skip a tensor.
 
 ### Output sharding policy
 
+> Superseded by [ADR 0015](0015-sharded-output.md), which implements output sharding. The text below records the original deferral.
+
 Task 14 covers **input sharding only**. ModelQ will continue to write one
 SafeTensors output file for the current INT8 command. It will not emit an
 output index, split a result into multiple files, or infer an output shard size

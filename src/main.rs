@@ -1,4 +1,5 @@
 mod nvfp4_command;
+mod output;
 
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -9,9 +10,9 @@ use modelq::{
     },
     io::{
         layout::{OutputTensorRole, plan_output_layout},
-        safetensors::{Inspection, MappedSafetensors, TensorSource, TensorSummary, inspect_file},
+        safetensors::{Inspection, TensorSource, TensorSummary, inspect_file},
         sharded::SafetensorsInput,
-        writer::write_safetensors,
+        writer::{WriterError, write_safetensors},
     },
     quant::{
         int8::{DEFAULT_CHUNK_ELEMENTS, validate_dequantization},
@@ -122,6 +123,15 @@ fn build_cli() -> Command {
                         .required(true),
                 )
                 .arg(
+                    Arg::new("max-shard-size")
+                        .long("max-shard-size")
+                        .value_name("SIZE")
+                        .value_parser(value_parser!(String))
+                        .help(
+                            "write a sharded directory at --output; SIZE is bytes or e.g. 500MB, 2GiB",
+                        ),
+                )
+                .arg(
                     Arg::new("exclude")
                         .long("exclude")
                         .value_name("SUBSTRING")
@@ -186,6 +196,10 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
         "nvfp4" => {
             let (input, output) = quantize_paths(matches)?;
             require_cpu(matches)?;
+            let target = output::OutputTarget::from_args(
+                output,
+                matches.get_one::<String>("max-shard-size"),
+            )?;
             let options = nvfp4_command::Nvfp4Options {
                 exclude: matches
                     .get_many::<String>("exclude")
@@ -193,7 +207,7 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                     .unwrap_or_default(),
                 default_excludes: !matches.get_flag("no-default-excludes"),
             };
-            nvfp4_command::run(&input, &output, &options)
+            nvfp4_command::run(&input, &target, &options)
         }
         other => Err(format!(
             "unsupported format {other:?}; supported formats are int8 and nvfp4"
@@ -231,10 +245,13 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
         .get_one::<PathBuf>("model")
         .ok_or_else(|| "quantize requires a model path".to_owned())?
         .clone();
-    let output = matches
-        .get_one::<PathBuf>("output")
-        .ok_or_else(|| "quantize requires --output <PATH>".to_owned())?
-        .clone();
+    let target = output::OutputTarget::from_args(
+        matches
+            .get_one::<PathBuf>("output")
+            .ok_or_else(|| "quantize requires --output <PATH>".to_owned())?
+            .clone(),
+        matches.get_one::<String>("max-shard-size"),
+    )?;
     let format = matches
         .get_one::<String>("format")
         .ok_or_else(|| "quantize requires --format int8".to_owned())?;
@@ -281,20 +298,44 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
     );
     print_progress(&source, &summaries, &decisions)?;
 
-    println!("Writing output: {}", output.display());
-    write_safetensors(&source, &plan, &decisions, &output)
-        .map_err(|error| format!("could not write output: {error}"))?;
+    println!("Writing output: {}", target.describe());
+    let mut sized: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for tensor in &plan.tensors {
+        *sized.entry(tensor.source_name.clone()).or_default() += tensor.byte_len;
+    }
+    let sized: Vec<(String, u64)> = sized.into_iter().collect();
+    let written = target.write(&source, &sized, |subset, path| {
+        let subset_summaries = subset.tensor_summaries();
+        let names: BTreeSet<&str> = subset_summaries
+            .iter()
+            .map(|summary| summary.name.as_str())
+            .collect();
+        let subset_decisions: Vec<TensorDecision> = decisions
+            .iter()
+            .filter(|decision| names.contains(decision.name.as_str()))
+            .cloned()
+            .collect();
+        let subset_plan = plan_output_layout(&subset_summaries, &subset_decisions)
+            .map_err(|source| WriterError::Layout { source })?;
+        write_safetensors(subset, &subset_plan, &subset_decisions, path)?;
+        Ok::<_, WriterError>(
+            subset_plan
+                .tensors
+                .iter()
+                .map(|tensor| (tensor.name.clone(), tensor.byte_len))
+                .collect(),
+        )
+    })?;
 
     println!("Validating output by reopening and dequantizing it...");
-    let output_reader = MappedSafetensors::open(&output)
-        .map_err(|error| format!("output could not be reopened: {error}"))?;
+    let output_reader = target.open_output()?;
     let validation = validate_output(&source, &output_reader, &plan)?;
 
     Ok(QuantizeReport {
         source_path: input,
-        output_path: output,
+        output_path: target.path().to_owned(),
         source_bytes,
-        output_bytes: output_reader.file_size(),
+        output_bytes: output::OutputTarget::committed_bytes(&written)?,
         validation,
     })
 }
@@ -367,7 +408,7 @@ fn print_progress(
 
 fn validate_output(
     source: &impl TensorSource,
-    output: &MappedSafetensors,
+    output: &impl TensorSource,
     plan: &modelq::io::layout::OutputLayoutPlan,
 ) -> Result<ValidationReport, String> {
     let expected_names = plan
@@ -376,8 +417,9 @@ fn validate_output(
         .map(|tensor| tensor.name.clone())
         .collect::<BTreeSet<_>>();
     let actual_names = output
-        .tensors()
-        .map(|tensor| tensor.name.clone())
+        .tensor_summaries()
+        .into_iter()
+        .map(|tensor| tensor.name)
         .collect::<BTreeSet<_>>();
     if expected_names != actual_names {
         return Err("output tensor names do not match the planned layout".to_owned());
@@ -396,13 +438,13 @@ fn validate_output(
     for tensor in &plan.tensors {
         match tensor.role {
             OutputTensorRole::Preserved => {
-                let output_bytes = output
-                    .tensor_bytes(&tensor.name)
-                    .map_err(|error| error.to_string())?;
-                let unchanged = source
-                    .with_tensor_bytes(&tensor.source_name, |source_bytes| {
-                        source_bytes == output_bytes
+                let unchanged = output
+                    .with_tensor_bytes(&tensor.name, |output_bytes| {
+                        source.with_tensor_bytes(&tensor.source_name, |source_bytes| {
+                            source_bytes == output_bytes
+                        })
                     })
+                    .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?;
                 if !unchanged {
                     return Err(format!(
@@ -413,9 +455,6 @@ fn validate_output(
                 report.preserved_tensors += 1;
             }
             OutputTensorRole::QuantizedData => {
-                let qdata = output
-                    .tensor_bytes(&tensor.name)
-                    .map_err(|error| error.to_string())?;
                 let scale_name = format!("{}.scale", tensor.source_name);
                 let scale_tensor = plan
                     .tensor(&scale_name)
@@ -423,37 +462,16 @@ fn validate_output(
                 if scale_tensor.role != OutputTensorRole::QuantizationScale {
                     return Err(format!("tensor {scale_name:?} is not a scale tensor"));
                 }
-                let scale_bytes = output
-                    .tensor_bytes(&scale_name)
-                    .map_err(|error| error.to_string())?;
-                if scale_bytes.len() != 4 {
-                    return Err(format!(
-                        "scale tensor {scale_name:?} has {} bytes instead of 4",
-                        scale_bytes.len()
-                    ));
-                }
-                let scale = f32::from_le_bytes(
-                    scale_bytes
-                        .try_into()
-                        .expect("the scale length was checked above"),
-                );
-                validate_dequantization(qdata.iter().copied().map(|value| value as i8), scale)
-                    .map_err(|error| format!("could not dequantize {:?}: {error}", tensor.name))?;
-                let metrics = source
-                    .with_tensor(&tensor.source_name, |source_view| {
-                        reconstruction_metrics_streaming(
-                            source_view.values(),
-                            qdata
-                                .iter()
-                                .copied()
-                                .map(|value| f32::from(value as i8) * scale),
-                        )
+                let (metrics, saturated) = output
+                    .with_tensor_bytes(&tensor.name, |qdata| {
+                        output.with_tensor_bytes(&scale_name, |scale_bytes| {
+                            check_quantized_int8(source, tensor, qdata, scale_bytes)
+                        })
                     })
                     .map_err(|error| error.to_string())?
-                    .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
+                    .map_err(|error| error.to_string())??;
                 report.quantized_tensors += 1;
-                report.saturated_values +=
-                    saturation_count_iter(qdata.iter().copied().map(|value| value as i8));
+                report.saturated_values += saturated;
                 report.max_mse = report.max_mse.max(metrics.mse);
                 report.max_mae = report.max_mae.max(metrics.mae);
                 report.max_abs_error = report.max_abs_error.max(metrics.max_abs_error);
@@ -470,6 +488,42 @@ fn validate_output(
     }
 
     Ok(report)
+}
+
+fn check_quantized_int8(
+    source: &impl TensorSource,
+    tensor: &modelq::io::layout::OutputTensorPlan,
+    qdata: &[u8],
+    scale_bytes: &[u8],
+) -> Result<(modelq::diagnostics::ReconstructionMetrics, u64), String> {
+    if scale_bytes.len() != 4 {
+        return Err(format!(
+            "scale tensor for {:?} has {} bytes instead of 4",
+            tensor.source_name,
+            scale_bytes.len()
+        ));
+    }
+    let scale = f32::from_le_bytes(
+        scale_bytes
+            .try_into()
+            .expect("the scale length was checked above"),
+    );
+    validate_dequantization(qdata.iter().copied().map(|value| value as i8), scale)
+        .map_err(|error| format!("could not dequantize {:?}: {error}", tensor.name))?;
+    let metrics = source
+        .with_tensor(&tensor.source_name, |source_view| {
+            reconstruction_metrics_streaming(
+                source_view.values(),
+                qdata
+                    .iter()
+                    .copied()
+                    .map(|value| f32::from(value as i8) * scale),
+            )
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("could not validate {:?}: {error}", tensor.name))?;
+    let saturated = saturation_count_iter(qdata.iter().copied().map(|value| value as i8));
+    Ok((metrics, saturated))
 }
 
 fn print_quantize_report(report: &QuantizeReport) {
