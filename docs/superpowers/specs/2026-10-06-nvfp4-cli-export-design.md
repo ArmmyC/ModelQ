@@ -1,6 +1,6 @@
 # NVFP4 CLI Export over Sharded Input
 
-- Status: approved (Decision 2 option A chosen 2026-10-06); implementation pending
+- Status: approved (Decision 2 option A chosen 2026-10-06); implemented in Tasks 31 and 32 (see ADR 0014)
 - Date: 2026-10-06
 - Scope: a `modelq quantize --format nvfp4` command that reads a single or sharded SafeTensors checkpoint and writes one ModelQ-native NVFP4 SafeTensors file
 - Related decisions: [ADR 0003](../../adr/0003-sharded-safetensors-input-design.md), [ADR 0010](../../adr/0010-nvfp4-research-spike.md), [ADR 0011](../../adr/0011-nvfp4-native-safetensors-convention.md), [ADR 0012](../../adr/0012-transformer-engine-nvfp4-export-profile.md), [ADR 0013](../../adr/0013-transformer-engine-nvfp4-runtime-container.md)

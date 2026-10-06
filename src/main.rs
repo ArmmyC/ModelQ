@@ -1,3 +1,5 @@
+mod nvfp4_command;
+
 use std::{collections::BTreeSet, path::PathBuf};
 
 use clap::{Arg, ArgMatches, Command, value_parser};
@@ -26,9 +28,7 @@ fn main() {
             };
             run_inspect(path)
         }
-        Some(("quantize", matches)) => {
-            run_quantize(matches).map(|report| print_quantize_report(&report))
-        }
+        Some(("quantize", matches)) => run_quantize_command(matches),
         _ => Ok(()),
     };
 
@@ -93,7 +93,7 @@ fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("quantize")
-                .about("Quantize a SafeTensors checkpoint with the CPU INT8 path")
+                .about("Quantize a SafeTensors checkpoint (CPU, INT8 or ModelQ-native NVFP4)")
                 .arg(
                     Arg::new("model")
                         .value_name("MODEL")
@@ -120,6 +120,20 @@ fn build_cli() -> Command {
                         .value_name("PATH")
                         .value_parser(value_parser!(PathBuf))
                         .required(true),
+                )
+                .arg(
+                    Arg::new("exclude")
+                        .long("exclude")
+                        .value_name("SUBSTRING")
+                        .value_parser(value_parser!(String))
+                        .action(clap::ArgAction::Append)
+                        .help("nvfp4 only: also preserve tensors whose name contains SUBSTRING"),
+                )
+                .arg(
+                    Arg::new("no-default-excludes")
+                        .long("no-default-excludes")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("nvfp4 only: quantize embedding and lm_head tensors too"),
                 ),
         )
 }
@@ -152,6 +166,64 @@ struct ValidationReport {
     max_mae: f64,
     max_abs_error: f64,
     lowest_sqnr_db: Option<f64>,
+}
+
+fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
+    let format = matches
+        .get_one::<String>("format")
+        .ok_or_else(|| "quantize requires --format <int8|nvfp4>".to_owned())?;
+    let has_nvfp4_options =
+        matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
+    match format.as_str() {
+        "int8" => {
+            if has_nvfp4_options {
+                return Err(
+                    "--exclude and --no-default-excludes apply only to --format nvfp4".to_owned(),
+                );
+            }
+            run_quantize(matches).map(|report| print_quantize_report(&report))
+        }
+        "nvfp4" => {
+            let (input, output) = quantize_paths(matches)?;
+            require_cpu(matches)?;
+            let options = nvfp4_command::Nvfp4Options {
+                exclude: matches
+                    .get_many::<String>("exclude")
+                    .map(|values| values.cloned().collect())
+                    .unwrap_or_default(),
+                default_excludes: !matches.get_flag("no-default-excludes"),
+            };
+            nvfp4_command::run(&input, &output, &options)
+        }
+        other => Err(format!(
+            "unsupported format {other:?}; supported formats are int8 and nvfp4"
+        )),
+    }
+}
+
+fn quantize_paths(matches: &ArgMatches) -> Result<(PathBuf, PathBuf), String> {
+    let input = matches
+        .get_one::<PathBuf>("model")
+        .ok_or_else(|| "quantize requires a model path".to_owned())?
+        .clone();
+    let output = matches
+        .get_one::<PathBuf>("output")
+        .ok_or_else(|| "quantize requires --output <PATH>".to_owned())?
+        .clone();
+    Ok((input, output))
+}
+
+fn require_cpu(matches: &ArgMatches) -> Result<(), String> {
+    let device = matches
+        .get_one::<String>("device")
+        .map(String::as_str)
+        .unwrap_or("cpu");
+    if device != "cpu" {
+        return Err(format!(
+            "unsupported device {device:?}; only cpu is supported"
+        ));
+    }
+    Ok(())
 }
 
 fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {

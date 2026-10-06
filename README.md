@@ -87,6 +87,16 @@ are mapped per call, one shard at a time. Task 30 wires it into the CLI:
 directory or index path as well as a single file. The INT8 output is still one
 SafeTensors file; output sharding and sharded NVFP4 export are not implemented.
 
+Tasks 31 and 32 add `modelq quantize --format nvfp4`, which writes the
+ModelQ-native NVFP4 container from a single or sharded checkpoint using a
+bounded-memory two-pass quantizer. It quantizes floating tensors with rank two
+or more and a final dimension divisible by 16, preserves everything else with a
+printed reason, and keeps names containing `embed_tokens`, `lm_head`, or
+`embeddings` at full precision unless `--no-default-excludes` is passed
+(`--exclude <SUBSTRING>` adds more). The output is ModelQ-native only; no
+runtime compatibility is implied. See
+[ADR 0014](docs/adr/0014-nvfp4-cli-export.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

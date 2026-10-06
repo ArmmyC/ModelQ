@@ -528,6 +528,9 @@ pub fn dequantize(
 }
 
 /// Validates packed values, block scales, and the tensor-wide decode scale.
+///
+/// Validation reads the packed bytes in place and allocates nothing, so it is
+/// safe to use on tensors too large to unpack.
 pub fn validate_parts(
     packed: &[u8],
     block_scales: &[u8],
@@ -557,21 +560,47 @@ pub fn validate_parts(
         });
     }
 
-    let values = unpack(packed, elements)?;
     for (block, &scale_bits) in block_scales.iter().enumerate() {
         validate_block_scale(scale_bits, block)?;
         if scale_bits == 0 {
             let start = block.saturating_mul(BLOCK_SIZE);
             let end = elements.min(start.saturating_add(BLOCK_SIZE));
-            if let Some(offset) = values[start..end].iter().position(|&code| code & 0x07 != 0) {
-                return Err(Nvfp4Error::ZeroScaleWithNonzeroValue {
-                    block,
-                    index: start + offset,
-                });
+            if let Some(index) = (start..end).find(|&index| code_at(packed, index) & 0x07 != 0) {
+                return Err(Nvfp4Error::ZeroScaleWithNonzeroValue { block, index });
             }
         }
     }
     Ok(())
+}
+
+/// Lazily reconstructs F32 values after validating the parts.
+///
+/// Yields exactly the values [`dequantize`] returns, one at a time, without
+/// materializing the tensor.  Use it to compare large tensors in bounded
+/// memory.  Values are not checked for overflow here because a validated
+/// decode scale and block scales cannot exceed the finite F32 range for data
+/// produced by [`quantize`]; use [`dequantize`] when untrusted parts must be
+/// proven finite.
+pub fn dequantize_iter<'a>(
+    packed: &'a [u8],
+    block_scales: &'a [u8],
+    global_scale: f32,
+    elements: usize,
+) -> Result<impl ExactSizeIterator<Item = f32> + 'a, Nvfp4Error> {
+    validate_parts(packed, block_scales, global_scale, elements)?;
+    Ok((0..elements).map(move |index| {
+        let block_scale = fp8_e4m3::decode(block_scales[index / BLOCK_SIZE]);
+        fp4_e2m1::decode(code_at(packed, index)) * block_scale * global_scale
+    }))
+}
+
+fn code_at(packed: &[u8], index: usize) -> u8 {
+    let byte = packed[index / VALUES_PER_BYTE];
+    if index % VALUES_PER_BYTE == 0 {
+        byte & 0x0f
+    } else {
+        byte >> 4
+    }
 }
 
 /// Returns the packed byte count for an element count.
@@ -617,8 +646,9 @@ fn validate_block_scale(bits: u8, block: usize) -> Result<(), Nvfp4Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_SIZE, FP4_MAX, FP8_MAX, Nvfp4Error, Nvfp4StreamError, block_count, dequantize, pack,
-        packed_len, quantize, quantize_replay_chunks, quantize_shaped, unpack, validate_parts,
+        BLOCK_SIZE, FP4_MAX, FP8_MAX, Nvfp4Error, Nvfp4StreamError, block_count, dequantize,
+        dequantize_iter, pack, packed_len, quantize, quantize_replay_chunks, quantize_shaped,
+        unpack, validate_parts,
     };
 
     #[test]
@@ -951,5 +981,36 @@ mod tests {
         )
         .expect_err("callback failure is surfaced");
         assert!(matches!(error, Nvfp4StreamError::Callback("sink failed")));
+    }
+
+    #[test]
+    fn dequantize_iter_matches_dequantize_and_rejects_bad_parts() {
+        let values = spread_values(16 * 12, 21);
+        let quantized = quantize_shaped(&values, &[12, 16]).expect("quantizes");
+        let eager = quantized.dequantize().expect("dequantizes");
+        let lazy: Vec<f32> = dequantize_iter(
+            quantized.packed(),
+            quantized.block_scales(),
+            quantized.global_scale(),
+            values.len(),
+        )
+        .expect("parts validate")
+        .collect();
+        assert_eq!(
+            eager
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            lazy.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
+
+        assert!(matches!(
+            dequantize_iter(quantized.packed(), quantized.block_scales(), 0.0, 192),
+            Err(Nvfp4Error::InvalidGlobalScale { .. })
+        ));
+        assert!(matches!(
+            dequantize_iter(&[0xff], &[0x38], 1.0, 16),
+            Err(Nvfp4Error::PackedLengthMismatch { .. })
+        ));
     }
 }
