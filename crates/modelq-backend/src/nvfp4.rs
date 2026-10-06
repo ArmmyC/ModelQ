@@ -15,14 +15,17 @@
 //! to be `Send`.  Memory is one chunk of `f32` values plus its packed bytes,
 //! and the block scales (one byte per 16 values).
 
-use std::{fmt, thread};
+use std::fmt;
 
 use modelq_quant::nvfp4::{
     self, BLOCK_SIZE, Nvfp4Error, StreamedQuantization, block_count, encode_chunk, packed_len,
     scan_chunk_amax,
 };
 
-use crate::cpu::{MAX_WORKERS, ParallelConfig};
+use crate::{
+    cpu::{MAX_WORKERS, ParallelConfig},
+    schedule::{self, RANGES_PER_WORKER, WorkerPanicked},
+};
 
 /// Default values per chunk (4,194,304 values: 16 MiB of `f32`).
 ///
@@ -30,8 +33,8 @@ use crate::cpu::{MAX_WORKERS, ParallelConfig};
 /// stays small next to the encode work.
 pub const DEFAULT_CHUNK_ELEMENTS: usize = 1 << 22;
 
-/// Blocks below which an extra worker is not worth its start-up cost.
-const MIN_BLOCKS_PER_WORKER: usize = 256;
+/// Fewest blocks in a range, so a range is always worth scheduling.
+const MIN_BLOCKS_PER_RANGE: usize = 64;
 
 /// Errors returned by the parallel NVFP4 path.  `E` is the caller's callback
 /// error.
@@ -160,15 +163,15 @@ where
     ))
 }
 
-/// Chooses how many workers a chunk of `blocks` blocks should use.
-fn worker_count(blocks: usize, workers: usize) -> usize {
-    workers.min(blocks.div_ceil(MIN_BLOCKS_PER_WORKER)).max(1)
-}
-
-/// Values per worker range: a whole number of blocks, so every range after
-/// the first starts on a block boundary.
+/// Values per range: a whole number of blocks, so every range after the
+/// first starts on a block boundary.  A chunk is cut into several ranges per
+/// worker (see [`crate::schedule`]) so faster cores can take more of them; tiny
+/// chunks get fewer ranges so no worker is started for almost no work.
 fn range_values(blocks: usize, workers: usize) -> usize {
-    blocks.div_ceil(workers) * BLOCK_SIZE
+    let ranges = (workers * RANGES_PER_WORKER)
+        .min(blocks.div_ceil(MIN_BLOCKS_PER_RANGE))
+        .max(1);
+    blocks.div_ceil(ranges) * BLOCK_SIZE
 }
 
 fn parallel_amax<E>(
@@ -176,25 +179,13 @@ fn parallel_amax<E>(
     first_index: usize,
     workers: usize,
 ) -> Result<f32, Nvfp4ParallelError<E>> {
-    let workers = worker_count(block_count(values.len()), workers);
-    if workers == 1 {
-        return scan_chunk_amax(values, first_index).map_err(Nvfp4ParallelError::Quantization);
-    }
     let per_range = range_values(block_count(values.len()), workers);
-    let results: Vec<Result<f32, Nvfp4Error>> = thread::scope(|scope| {
-        let handles: Vec<_> = values
-            .chunks(per_range)
-            .enumerate()
-            .map(|(index, range)| {
-                scope.spawn(move || scan_chunk_amax(range, first_index + index * per_range))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().map_err(|_| ()))
-            .collect::<Result<Vec<_>, ()>>()
-    })
-    .map_err(|()| Nvfp4ParallelError::WorkerPanicked)?;
+    let results = schedule::run_all(
+        values.chunks(per_range).collect(),
+        workers,
+        |index, range| scan_chunk_amax(range, first_index + index * per_range),
+    )
+    .map_err(|WorkerPanicked| Nvfp4ParallelError::WorkerPanicked)?;
 
     // Ranges are in index order, so the first error is the lowest index.
     let mut amax = 0.0_f32;
@@ -212,37 +203,22 @@ fn parallel_encode<E>(
     scales: &mut [u8],
     workers: usize,
 ) -> Result<(), Nvfp4ParallelError<E>> {
-    let blocks = block_count(values.len());
-    let workers = worker_count(blocks, workers);
-    if workers == 1 {
-        return encode_chunk(values, first_index, global_amax, packed, scales)
-            .map_err(Nvfp4ParallelError::Quantization);
-    }
-    let per_range = range_values(blocks, workers);
-    let results: Vec<Result<(), Nvfp4Error>> = thread::scope(|scope| {
-        let handles: Vec<_> = values
-            .chunks(per_range)
-            .zip(packed.chunks_mut(per_range / 2))
-            .zip(scales.chunks_mut(per_range / BLOCK_SIZE))
-            .enumerate()
-            .map(|(index, ((range, packed), scales))| {
-                scope.spawn(move || {
-                    encode_chunk(
-                        range,
-                        first_index + index * per_range,
-                        global_amax,
-                        packed,
-                        scales,
-                    )
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().map_err(|_| ()))
-            .collect::<Result<Vec<_>, ()>>()
+    let per_range = range_values(block_count(values.len()), workers);
+    let items: Vec<_> = values
+        .chunks(per_range)
+        .zip(packed.chunks_mut(per_range / 2))
+        .zip(scales.chunks_mut(per_range / BLOCK_SIZE))
+        .collect();
+    let results = schedule::run_all(items, workers, |index, ((range, packed), scales)| {
+        encode_chunk(
+            range,
+            first_index + index * per_range,
+            global_amax,
+            packed,
+            scales,
+        )
     })
-    .map_err(|()| Nvfp4ParallelError::WorkerPanicked)?;
+    .map_err(|WorkerPanicked| Nvfp4ParallelError::WorkerPanicked)?;
 
     for result in results {
         result.map_err(Nvfp4ParallelError::Quantization)?;
