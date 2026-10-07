@@ -4,12 +4,13 @@ Evaluates the container written by `modal_runtime_proof.py::validate_model`
 (stored in the `modelq-te-fixtures` volume) against the original model on
 WikiText-2, on a small GPU:
 
-    python -m modal run tools/quality_eval/modal_quality_eval.py --name qwen2.5-0.5b
+    python -m modal run tools/quality_eval/modal_quality_eval.py --names qwen2.5-0.5b,qwen2.5-0.5b-r6
 
 Everything is downloaded inside Modal, never to the local machine: the model
 files at the pinned commit (the weights' SHA-256 is checked against Hugging
 Face's published value) and the WikiText-2 test split (SHA-256 checked the
-same way).  The result is written to `modal_results/<name>-quality.json`.
+same way).  The result is written to `modal_results/<first name>-quality.json`.  Several containers are
+compared against one original-model baseline in a single run.
 """
 
 from __future__ import annotations
@@ -62,8 +63,8 @@ def _download_verified(url: str, destination: pathlib.Path, expected_sha256: str
 
 
 @app.function(image=image, gpu="L4", timeout=3600, volumes={BUILT_ROOT: volume})
-def evaluate(name: str = "qwen2.5-0.5b") -> dict:
-    """Downloads the pinned model and dataset, then compares original and NVFP4 on WikiText-2."""
+def evaluate(names: list[str]) -> dict:
+    """Downloads the pinned model and dataset, then compares original and each NVFP4 container on WikiText-2."""
     import sys
 
     import pyarrow.parquet as pq
@@ -78,9 +79,10 @@ def evaluate(name: str = "qwen2.5-0.5b") -> dict:
 
     started = time.time()
     volume.reload()
-    container = pathlib.Path(BUILT_ROOT) / name / "te.safetensors"
-    if not container.is_file():
-        raise RuntimeError(f"{container} not found; run modal_runtime_proof.py::validate_model first")
+    containers = {name: pathlib.Path(BUILT_ROOT) / name / "te.safetensors" for name in names}
+    for container in containers.values():
+        if not container.is_file():
+            raise RuntimeError(f"{container} not found; run modal_runtime_proof.py::validate_model first")
 
     # --- model files, pinned and verified -------------------------------------------------
     model_api = _api(f"models/{MODEL}?blobs=true")
@@ -111,18 +113,24 @@ def evaluate(name: str = "qwen2.5-0.5b") -> dict:
     token_ids = tokenizer(text, return_tensors=None)["input_ids"]
     windows = qe.make_windows(token_ids, WINDOW)
 
-    # --- the two models, both float32 -----------------------------------------------------
+    # --- the models, all float32 ----------------------------------------------------------
     device = torch.device("cuda")
     base = AutoModelForCausalLM.from_pretrained(local, torch_dtype=torch.float32).to(device)
-    quantized = AutoModelForCausalLM.from_pretrained(local, torch_dtype=torch.float32).to(device)
-    substitution = qe.substitute_nvfp4_weights(quantized, container, torch)
-    result = qe.evaluate_pair(base, quantized, windows, torch, device)
-    result["relative_perplexity_increase"] = qe.relative_perplexity_increase(result)
+    variants = {}
+    for name, container in containers.items():
+        quantized = AutoModelForCausalLM.from_pretrained(local, torch_dtype=torch.float32).to(device)
+        substitution = qe.substitute_nvfp4_weights(quantized, container, torch)
+        result = qe.evaluate_pair(base, quantized, windows, torch, device)
+        result["relative_perplexity_increase"] = qe.relative_perplexity_increase(result)
+        variants[name] = {"container": str(container), "substitution": substitution.summary(), "result": result}
+        del quantized
+        torch.cuda.empty_cache()
 
     # A pipeline that is broken (wrong text, wrong weights) would give an absurd
     # baseline; fail loudly instead of reporting a meaningless comparison.
-    if not 3.0 < result["perplexity_original"] < 60.0:
-        raise RuntimeError(f"implausible baseline perplexity {result['perplexity_original']}")
+    baseline = next(iter(variants.values()))["result"]["perplexity_original"]
+    if not 3.0 < baseline < 60.0:
+        raise RuntimeError(f"implausible baseline perplexity {baseline}")
 
     return {
         "model": {"id": MODEL, "revision": revision, "license": license_id,
@@ -131,9 +139,7 @@ def evaluate(name: str = "qwen2.5-0.5b") -> dict:
                     "license": data_license, "sha256": entry["lfs"]["sha256"]},
         "text": {"characters": len(text), "tokens": len(token_ids), "window": WINDOW,
                  "windows": len(windows), "tokens_scored": result["positions"]},
-        "container": str(container),
-        "substitution": substitution.summary(),
-        "result": result,
+        "variants": variants,
         "environment": {"torch": torch.__version__, "transformers": transformers.__version__,
                         "gpu": torch.cuda.get_device_name(), "dtype": "float32"},
         "seconds": round(time.time() - started, 1),
@@ -141,17 +147,20 @@ def evaluate(name: str = "qwen2.5-0.5b") -> dict:
 
 
 @app.local_entrypoint()
-def main(name: str = "qwen2.5-0.5b") -> None:
-    result = evaluate.remote(name)
+def main(names: str = "qwen2.5-0.5b") -> None:
+    listed = [part for part in names.split(",") if part]
+    result = evaluate.remote(listed)
     results = REPO / "modal_results"
     results.mkdir(exist_ok=True)
-    path = results / f"{name}-quality.json"
+    path = results / f"{listed[0]}-quality.json"
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    metrics = result["result"]
-    print(json.dumps({k: result[k] for k in ("model", "dataset", "text", "substitution", "environment")}, indent=2))
-    print(f"perplexity original  : {metrics['perplexity_original']:.4f}")
-    print(f"perplexity NVFP4     : {metrics['perplexity_quantized']:.4f}"
-          f"  ({metrics['relative_perplexity_increase'] * 100:+.2f}%)")
-    print(f"mean KL(orig||NVFP4) : {metrics['mean_kl_original_to_quantized']:.6f} nats/token")
-    print(f"top-1 agreement      : {metrics['top1_agreement'] * 100:.2f}%")
+    print(json.dumps({k: result[k] for k in ("model", "dataset", "text", "environment")}, indent=2))
+    print(f"{'container':<28}{'ppl orig':>10}{'ppl quant':>11}{'increase':>10}{'KL nats/tok':>13}{'top-1 agree':>13}{'rel.err':>9}")
+    for name, variant in result["variants"].items():
+        metrics = variant["result"]
+        print(
+            f"{name:<28}{metrics['perplexity_original']:>10.4f}{metrics['perplexity_quantized']:>11.4f}"
+            f"{metrics['relative_perplexity_increase'] * 100:>9.2f}%{metrics['mean_kl_original_to_quantized']:>13.6f}"
+            f"{metrics['top1_agreement'] * 100:>12.2f}%{variant['substitution']['relative_frobenius_error_mean'] * 100:>8.2f}%"
+        )
     print(f"result written to {path}")

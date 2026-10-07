@@ -19,6 +19,42 @@ pub const FP4_MAX: f32 = fp4_e2m1::MAX_FINITE;
 /// Maximum finite magnitude of the E4M3 block-scale format.
 pub const FP8_MAX: f32 = fp8_e4m3::MAX_FINITE;
 const SCALE_PRODUCT: f32 = FP4_MAX * FP8_MAX;
+/// Largest finite E4M3 magnitude code (`0x7e`); `0x7f` is NaN.
+const MAX_E4M3_BITS: u8 = 0x7e;
+
+/// How the encoder chooses each block's E4M3 scale.
+///
+/// The choice only changes which scale byte is stored; every selection
+/// produces the same representation (E2M1 values, E4M3 block scales, one
+/// tensor-wide decode scale), so a decoder or runtime needs no change.  The
+/// per-tensor global scale is unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaleSelection {
+    /// The reference rule: the E4M3 value nearest `block_amax / global_amax * 448`,
+    /// so the block's largest value maps to about 6.
+    #[default]
+    Amax,
+    /// Try every E4M3 scale within `radius` codes of the reference choice and
+    /// keep the one with the smallest squared reconstruction error for the
+    /// block.  Ties keep the reference scale, then the nearer, then the
+    /// smaller code.  `radius = 0` is identical to [`Self::Amax`].
+    MinMse { radius: u8 },
+}
+
+impl ScaleSelection {
+    /// Whether this is the reference rule (and so changes no output byte).
+    pub const fn is_default(self) -> bool {
+        matches!(self, Self::Amax) || matches!(self, Self::MinMse { radius: 0 })
+    }
+
+    /// A short, stable label recorded in container metadata.
+    pub fn label(self) -> String {
+        match self {
+            Self::Amax => "amax".to_owned(),
+            Self::MinMse { radius } => format!("min-mse:r{radius}"),
+        }
+    }
+}
 const MIN_POSITIVE_E4M3_BITS: u8 = 0x01;
 const MIN_POSITIVE_F32: f32 = f32::from_bits(1);
 
@@ -228,12 +264,27 @@ impl QuantizedTensor {
 /// source tensor's final dimension must be checked against the native block
 /// layout.
 pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
+    quantize_with(values, ScaleSelection::default())
+}
+
+/// [`quantize`] with an explicit block-scale selection.
+pub fn quantize_with(
+    values: &[f32],
+    selection: ScaleSelection,
+) -> Result<QuantizedTensor, Nvfp4Error> {
     let global_amax = max_abs(values)?;
     let global_scale = global_scale_for_amax(global_amax);
 
     let mut packed = vec![0_u8; packed_len(values.len())];
     let mut block_scales = vec![0_u8; block_count(values.len())];
-    encode_chunk(values, 0, global_amax, &mut packed, &mut block_scales)?;
+    encode_chunk_with(
+        values,
+        0,
+        global_amax,
+        selection,
+        &mut packed,
+        &mut block_scales,
+    )?;
     Ok(QuantizedTensor {
         packed,
         block_scales,
@@ -249,6 +300,15 @@ pub fn quantize(values: &[f32]) -> Result<QuantizedTensor, Nvfp4Error> {
 /// [`BLOCK_SIZE`].  The returned representation remains flat; callers retain
 /// the original `shape` for their container or tensor metadata.
 pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTensor, Nvfp4Error> {
+    quantize_shaped_with(values, shape, ScaleSelection::default())
+}
+
+/// [`quantize_shaped`] with an explicit block-scale selection.
+pub fn quantize_shaped_with(
+    values: &[f32],
+    shape: &[usize],
+    selection: ScaleSelection,
+) -> Result<QuantizedTensor, Nvfp4Error> {
     let expected = checked_shape_elements(shape)?;
     if expected != values.len() {
         return Err(Nvfp4Error::ShapeLengthMismatch {
@@ -257,7 +317,7 @@ pub fn quantize_shaped(values: &[f32], shape: &[usize]) -> Result<QuantizedTenso
         });
     }
 
-    quantize(values)
+    quantize_with(values, selection)
 }
 
 /// Validates a shape for NVFP4 and returns its checked element count.
@@ -349,6 +409,73 @@ fn encode_block_into(
     Ok(scale_bits)
 }
 
+/// Encodes one block choosing its E4M3 scale by minimum squared error.
+///
+/// Starts from the reference encoding (so non-finite input is reported exactly
+/// as before), then tries every nonzero E4M3 code within `radius` of the
+/// reference code.  A candidate is scored by re-encoding the block's values with
+/// that scale and summing the squared difference to the decoded value
+/// (`e2m1 * scale * global_scale`, the decoder's own arithmetic).  Candidates
+/// are visited by increasing distance from the reference, lower code first, and
+/// replace the incumbent only on a strictly smaller error, which makes ties
+/// deterministic: reference, then nearest, then lowest code.
+#[inline]
+fn encode_block_min_mse(
+    chunk: &[f32],
+    start_index: usize,
+    global_amax: f32,
+    radius: u8,
+    codes: &mut [u8; BLOCK_SIZE],
+) -> Result<u8, Nvfp4Error> {
+    let reference_bits = encode_block_into(chunk, start_index, global_amax, codes)?;
+    if reference_bits == 0 || radius == 0 {
+        return Ok(reference_bits);
+    }
+
+    // The same normalization the reference applies before dividing by the scale.
+    let mut normalized = [0.0_f32; BLOCK_SIZE];
+    for (slot, &value) in normalized.iter_mut().zip(chunk) {
+        *slot = (value / global_amax) * SCALE_PRODUCT;
+    }
+    let global_scale = global_scale_for_amax(global_amax);
+    let error_for = |bits: u8| -> f32 {
+        let scale = fp8_e4m3::decode(bits);
+        let mut error = 0.0_f32;
+        for (&value, &scaled) in chunk.iter().zip(&normalized) {
+            let code = fp4_e2m1::encode_unchecked(scaled / scale);
+            let difference = value - fp4_e2m1::decode(code) * scale * global_scale;
+            error += difference * difference;
+        }
+        error
+    };
+
+    let mut best_bits = reference_bits;
+    let mut best_error = error_for(reference_bits);
+    for distance in 1..=radius {
+        let below = reference_bits
+            .checked_sub(distance)
+            .filter(|&bits| bits >= MIN_POSITIVE_E4M3_BITS);
+        let above = reference_bits
+            .checked_add(distance)
+            .filter(|&bits| bits <= MAX_E4M3_BITS);
+        for bits in below.into_iter().chain(above) {
+            let error = error_for(bits);
+            if error < best_error {
+                best_error = error;
+                best_bits = bits;
+            }
+        }
+    }
+
+    if best_bits != reference_bits {
+        let scale = fp8_e4m3::decode(best_bits);
+        for (code, &scaled) in codes.iter_mut().zip(&normalized) {
+            *code = fp4_e2m1::encode_unchecked(scaled / scale);
+        }
+    }
+    Ok(best_bits)
+}
+
 /// Returns the largest absolute value in a chunk of finite values.
 ///
 /// `first_index` is the flattened index of `values[0]` and is used to report
@@ -383,6 +510,25 @@ pub fn encode_chunk(
     packed: &mut [u8],
     block_scales: &mut [u8],
 ) -> Result<(), Nvfp4Error> {
+    encode_chunk_with(
+        values,
+        first_index,
+        global_amax,
+        ScaleSelection::default(),
+        packed,
+        block_scales,
+    )
+}
+
+/// [`encode_chunk`] with an explicit block-scale selection.
+pub fn encode_chunk_with(
+    values: &[f32],
+    first_index: usize,
+    global_amax: f32,
+    selection: ScaleSelection,
+    packed: &mut [u8],
+    block_scales: &mut [u8],
+) -> Result<(), Nvfp4Error> {
     if first_index % BLOCK_SIZE != 0 {
         return Err(Nvfp4Error::MisalignedChunk { first_index });
     }
@@ -404,12 +550,13 @@ pub fn encode_chunk(
 
     let mut codes = [0_u8; BLOCK_SIZE];
     for (block, chunk) in values.chunks(BLOCK_SIZE).enumerate() {
-        block_scales[block] = encode_block_into(
-            chunk,
-            first_index + block * BLOCK_SIZE,
-            global_amax,
-            &mut codes,
-        )?;
+        let start_index = first_index + block * BLOCK_SIZE;
+        block_scales[block] = match selection {
+            ScaleSelection::Amax => encode_block_into(chunk, start_index, global_amax, &mut codes)?,
+            ScaleSelection::MinMse { radius } => {
+                encode_block_min_mse(chunk, start_index, global_amax, radius, &mut codes)?
+            }
+        };
         // Two codes per byte, first value in the low nibble.  A partial final
         // block leaves the high nibble of its last byte zero.
         let first_byte = block * (BLOCK_SIZE / VALUES_PER_BYTE);
@@ -486,8 +633,24 @@ pub enum Nvfp4StreamError<E> {
 /// global scale are identical to it.
 pub fn quantize_replay_chunks<F, I, C, E>(
     shape: &[usize],
+    values: F,
+    chunk_blocks: usize,
+    emit: C,
+) -> Result<StreamedQuantization, Nvfp4StreamError<E>>
+where
+    F: FnMut() -> I,
+    I: IntoIterator<Item = f32>,
+    C: FnMut(&[u8]) -> Result<(), E>,
+{
+    quantize_replay_chunks_with(shape, values, chunk_blocks, ScaleSelection::default(), emit)
+}
+
+/// [`quantize_replay_chunks`] with an explicit block-scale selection.
+pub fn quantize_replay_chunks_with<F, I, C, E>(
+    shape: &[usize],
     mut values: F,
     chunk_blocks: usize,
+    selection: ScaleSelection,
     mut emit: C,
 ) -> Result<StreamedQuantization, Nvfp4StreamError<E>>
 where
@@ -535,10 +698,11 @@ where
         let scale_start = block_scales.len();
         block_scales.resize(scale_start + block_count(buffer.len()), 0);
         packed.resize(packed_len(buffer.len()), 0);
-        encode_chunk(
+        encode_chunk_with(
             &buffer,
             start,
             global_amax,
+            selection,
             &mut packed,
             &mut block_scales[scale_start..],
         )
@@ -1219,5 +1383,196 @@ mod tests {
         assert!(super::encode_chunk(&values, 0, 1.0, &mut packed[..15], &mut scales).is_err());
         assert!(super::encode_chunk(&values, 0, 1.0, &mut packed, &mut scales[..1]).is_err());
         assert!(super::encode_chunk(&values, 0, 1.0, &mut packed, &mut scales).is_ok());
+    }
+
+    use super::{ScaleSelection, quantize_replay_chunks_with, quantize_shaped_with, quantize_with};
+
+    fn mse(values: &[f32], quantized: &super::QuantizedTensor) -> f64 {
+        let decoded = quantized.dequantize().expect("dequantizes");
+        values
+            .iter()
+            .zip(&decoded)
+            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+            .sum::<f64>()
+            / values.len() as f64
+    }
+
+    #[test]
+    fn selection_labels_and_defaults() {
+        assert!(ScaleSelection::Amax.is_default());
+        assert!(ScaleSelection::MinMse { radius: 0 }.is_default());
+        assert!(!ScaleSelection::MinMse { radius: 4 }.is_default());
+        assert_eq!(ScaleSelection::default(), ScaleSelection::Amax);
+        assert_eq!(ScaleSelection::Amax.label(), "amax");
+        assert_eq!(ScaleSelection::MinMse { radius: 6 }.label(), "min-mse:r6");
+    }
+
+    #[test]
+    fn radius_zero_is_bit_identical_to_the_reference_rule() {
+        for (count, seed) in [(16, 1), (96, 2), (4096, 3), (1000, 4)] {
+            let values = spread_values(count, seed);
+            let reference = quantize(&values).expect("quantizes");
+            let searched =
+                quantize_with(&values, ScaleSelection::MinMse { radius: 0 }).expect("quantizes");
+            assert_eq!(searched, reference, "count={count}");
+        }
+    }
+
+    #[test]
+    fn the_search_never_increases_error_and_usually_reduces_it() {
+        let mut improved = 0;
+        for seed in 0..12 {
+            let values = spread_values(16 * 300, 100 + seed);
+            let reference = mse(&values, &quantize(&values).expect("quantizes"));
+            for radius in [1_u8, 4, 8] {
+                let searched =
+                    quantize_with(&values, ScaleSelection::MinMse { radius }).expect("quantizes");
+                let error = mse(&values, &searched);
+                assert!(
+                    error <= reference * (1.0 + 1e-9),
+                    "seed={seed} radius={radius}: {error} > {reference}"
+                );
+                if error < reference * 0.999 {
+                    improved += 1;
+                }
+            }
+        }
+        assert!(
+            improved >= 24,
+            "the search improved only {improved} of 36 runs"
+        );
+    }
+
+    #[test]
+    fn the_search_matches_an_independent_brute_force_oracle() {
+        use crate::float::{fp4_e2m1, fp8_e4m3};
+
+        // Re-derives the choice with the public checked codecs and the same
+        // arithmetic, outside the production loop.
+        fn oracle(block: &[f32], global_amax: f32, radius: u8) -> u8 {
+            let block_amax = block.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            if block_amax == 0.0 {
+                return 0;
+            }
+            let mut reference = fp8_e4m3::encode((block_amax / global_amax) * FP8_MAX);
+            if reference == 0 {
+                reference = 1;
+            }
+            let global_scale = super::global_scale_for_amax(global_amax);
+            let error = |bits: u8| {
+                let scale = fp8_e4m3::decode(bits);
+                let mut sum = 0.0_f32;
+                for &value in block {
+                    let scaled = ((value / global_amax) * super::SCALE_PRODUCT) / scale;
+                    let code = fp4_e2m1::encode(scaled).expect("finite");
+                    let difference = value - fp4_e2m1::decode(code) * scale * global_scale;
+                    sum += difference * difference;
+                }
+                sum
+            };
+            let mut candidates: Vec<u8> = (1..=0x7e_u8)
+                .filter(|&bits| bits.abs_diff(reference) <= radius)
+                .collect();
+            // Reference first, then nearest, lower code first.
+            candidates.sort_by_key(|&bits| (bits.abs_diff(reference), bits));
+            let mut best = candidates[0];
+            let mut best_error = error(best);
+            for &bits in &candidates[1..] {
+                let candidate_error = error(bits);
+                if candidate_error < best_error {
+                    best = bits;
+                    best_error = candidate_error;
+                }
+            }
+            best
+        }
+
+        for seed in 0..40 {
+            let values = spread_values(16 * 25, 500 + seed);
+            let global_amax = values.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+            for radius in [1_u8, 3, 6, 12] {
+                let searched =
+                    quantize_with(&values, ScaleSelection::MinMse { radius }).expect("quantizes");
+                for (block_index, block) in values.chunks(16).enumerate() {
+                    assert_eq!(
+                        searched.block_scales()[block_index],
+                        oracle(block, global_amax, radius),
+                        "seed={seed} radius={radius} block={block_index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn searched_output_is_valid_and_keeps_the_global_scale() {
+        let values = spread_values(16 * 500 + 5, 77);
+        let reference = quantize(&values).expect("quantizes");
+        let searched =
+            quantize_with(&values, ScaleSelection::MinMse { radius: 8 }).expect("quantizes");
+        assert_eq!(
+            searched.global_scale().to_bits(),
+            reference.global_scale().to_bits()
+        );
+        assert_eq!(searched.packed().len(), reference.packed().len());
+        validate_parts(
+            searched.packed(),
+            searched.block_scales(),
+            searched.global_scale(),
+            values.len(),
+        )
+        .expect("a searched tensor is a valid tensor");
+        for (&bits, block) in searched.block_scales().iter().zip(values.chunks(16)) {
+            if block.iter().all(|&value| value == 0.0) {
+                assert_eq!(bits, 0);
+            } else {
+                assert!((1..=0x7e).contains(&bits), "scale {bits:#x}");
+            }
+        }
+        assert!(
+            searched
+                .dequantize()
+                .expect("finite")
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        // A partial final block is searched too, and the result differs.
+        assert_ne!(searched, reference);
+    }
+
+    #[test]
+    fn streaming_equals_whole_slice_for_the_search() {
+        let selection = ScaleSelection::MinMse { radius: 6 };
+        let values = spread_values(16 * 700, 9);
+        let shape = [700, 16];
+        let reference = quantize_shaped_with(&values, &shape, selection).expect("quantizes");
+        for chunk_blocks in [1, 3, 7, 4096] {
+            let mut packed = Vec::new();
+            let streamed = quantize_replay_chunks_with(
+                &shape,
+                || values.iter().copied(),
+                chunk_blocks,
+                selection,
+                |chunk| -> Result<(), ()> {
+                    packed.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .expect("streams");
+            assert_eq!(packed, reference.packed(), "chunk_blocks={chunk_blocks}");
+            assert_eq!(streamed.block_scales(), reference.block_scales());
+        }
+    }
+
+    #[test]
+    fn the_search_reports_non_finite_input_like_the_reference() {
+        let mut values = vec![1.0_f32; 64];
+        values[37] = f32::NAN;
+        let selection = ScaleSelection::MinMse { radius: 4 };
+        let error = quantize_with(&values, selection).expect_err("NaN is rejected");
+        assert!(matches!(
+            error,
+            Nvfp4Error::NonFiniteInput { index: 37, .. }
+        ));
     }
 }

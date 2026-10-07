@@ -111,6 +111,16 @@ class MultiContainerTests(Base):
         self.assertEqual(sorted(result.preserved), ["ids", "norm"])
         self.assertEqual(result.matrices["c"].logical_shape, (144, 80))
 
+    def test_an_informational_encoder_key_does_not_affect_validation(self):
+        # Containers written with --scale-search record how scales were chosen;
+        # decoding is identical, so validators must accept the extra key.
+        manifest = copy.deepcopy(BASE_MANIFEST)
+        manifest["encoder"] = {"scale_selection": "min-mse:r6"}
+        manifest["tensors"]["w"] = matrix_entry("w", 48, 96)
+        write_container(self.path, manifest=manifest, tensors=matrix_tensors("w", 48, 96))
+        result = vm.validate_multi_container(self.path)
+        self.assertEqual(sorted(result.matrices), ["w"])
+
     def test_foreign_or_malformed_files_are_rejected(self):
         write_container(self.path, file_format="transformer-engine-nvfp4-safetensors-v1")
         self.assertRejected("modelq.format")

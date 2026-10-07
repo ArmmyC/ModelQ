@@ -134,6 +134,15 @@ fn build_cli() -> Command {
                         .help("worker threads (default: all CPUs; 1 = sequential reference path)"),
                 )
                 .arg(
+                    Arg::new("scale-search")
+                        .long("scale-search")
+                        .value_name("RADIUS")
+                        .value_parser(value_parser!(u8).range(0..=32))
+                        .help(
+                            "nvfp4 formats only: pick each block's E4M3 scale by minimum error within RADIUS codes of the default (0 = default rule)",
+                        ),
+                )
+                .arg(
                     Arg::new("exclude")
                         .long("exclude")
                         .value_name("SUBSTRING")
@@ -184,13 +193,15 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
     let format = matches
         .get_one::<String>("format")
         .ok_or_else(|| "quantize requires --format <int8|nvfp4|nvfp4-te>".to_owned())?;
-    let has_nvfp4_options =
-        matches.contains_id("exclude") || matches.get_flag("no-default-excludes");
+    let has_nvfp4_options = matches.contains_id("exclude")
+        || matches.contains_id("scale-search")
+        || matches.get_flag("no-default-excludes");
     match format.as_str() {
         "int8" => {
             if has_nvfp4_options {
                 return Err(
-                    "--exclude and --no-default-excludes apply only to --format nvfp4".to_owned(),
+                    "--exclude, --no-default-excludes and --scale-search apply only to the nvfp4 formats"
+                        .to_owned(),
                 );
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
@@ -214,6 +225,7 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                     .unwrap_or_default(),
                 default_excludes: !matches.get_flag("no-default-excludes"),
                 threads: matches.get_one::<usize>("threads").copied(),
+                scale_search: matches.get_one::<u8>("scale-search").copied(),
             };
             nvfp4_command::run(&input, &target, &options)
         }

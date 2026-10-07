@@ -19,18 +19,18 @@ use modelq::{
     diagnostics::reconstruction_metrics_streaming,
     io::{
         nvfp4::{
-            Nvfp4Execution, Nvfp4OutputPlan, Nvfp4OutputRole, plan_nvfp4_output,
-            write_nvfp4_safetensors_with,
+            Nvfp4Execution, Nvfp4OutputPlan, Nvfp4OutputRole, Nvfp4Settings, plan_nvfp4_output,
+            write_nvfp4_safetensors_settings,
         },
         safetensors::{MappedSafetensors, TensorSource, TensorSummary},
         sharded::SafetensorsInput,
         te_container::{
             TeOutputPlan, TeOutputRole, plan_te_output, read_te_container_manifest,
-            te_matrix_values, write_te_nvfp4_safetensors_with,
+            te_matrix_values, write_te_nvfp4_safetensors_settings,
         },
     },
     quant::{
-        nvfp4::dequantize_iter,
+        nvfp4::{ScaleSelection, dequantize_iter},
         nvfp4_policy::{Nvfp4Candidate, Nvfp4Decision, Nvfp4Policy},
         policy::PolicyAction,
     },
@@ -87,6 +87,8 @@ pub struct Nvfp4Options {
     pub default_excludes: bool,
     /// Worker threads; `None` uses every CPU and `Some(1)` the sequential path.
     pub threads: Option<usize>,
+    /// Block-scale search radius in E4M3 codes; `None` or `Some(0)` is the default rule.
+    pub scale_search: Option<u8>,
 }
 
 impl Nvfp4Options {
@@ -101,6 +103,13 @@ impl Nvfp4Options {
             None => Ok(Nvfp4Execution::Parallel(ParallelConfig::automatic(
                 parallel_nvfp4::DEFAULT_CHUNK_ELEMENTS,
             ))),
+        }
+    }
+
+    fn scales(&self) -> ScaleSelection {
+        match self.scale_search {
+            Some(radius) if radius > 0 => ScaleSelection::MinMse { radius },
+            _ => ScaleSelection::Amax,
         }
     }
 
@@ -146,6 +155,10 @@ fn quantize(
     options: &Nvfp4Options,
 ) -> Result<Nvfp4Report, String> {
     let execution = options.execution()?;
+    let settings = Nvfp4Settings {
+        execution,
+        scales: options.scales(),
+    };
     println!("Inspecting source: {}", input.display());
     let source = SafetensorsInput::open(input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();
@@ -218,6 +231,12 @@ fn quantize(
             );
         }
     }
+    if !settings.scales.is_default() {
+        println!(
+            "Block scales: {} (minimum-error search)",
+            settings.scales.label()
+        );
+    }
     println!("Writing output: {}", target.describe());
     let written = target.write(&source, &sized, |subset, path| {
         let subset_summaries = subset.tensor_summaries();
@@ -234,7 +253,7 @@ fn quantize(
             Nvfp4Profile::Native => {
                 let subset_plan = plan_nvfp4_output(&subset_summaries, &subset_selected)
                     .map_err(|error| format!("could not plan shard: {error}"))?;
-                write_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
+                write_nvfp4_safetensors_settings(subset, &subset_plan, path, settings)
                     .map_err(|error| error.to_string())?;
                 Ok::<_, String>(
                     subset_plan
@@ -247,7 +266,7 @@ fn quantize(
             Nvfp4Profile::TransformerEngine => {
                 let subset_plan = plan_te_output(&subset_summaries, &subset_selected)
                     .map_err(|error| format!("could not plan shard: {error}"))?;
-                write_te_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
+                write_te_nvfp4_safetensors_settings(subset, &subset_plan, path, settings)
                     .map_err(|error| error.to_string())?;
                 Ok::<_, String>(
                     subset_plan

@@ -1,6 +1,6 @@
 //! Write the F32 reference for a real checkpoint's Transformer Engine export.
 //!
-//! Usage: `te_reference_from_source <source.safetensors> <reference.safetensors>`
+//! Usage: `te_reference_from_source <source.safetensors> <reference.safetensors> [--scale-search RADIUS]`
 //!
 //! Applies the same Transformer Engine eligibility policy as
 //! `modelq quantize --format nvfp4-te`, re-quantizes every selected matrix
@@ -23,7 +23,7 @@ use std::{
 
 use modelq_io::safetensors::MappedSafetensors;
 use modelq_quant::{
-    nvfp4::quantize_shaped,
+    nvfp4::{ScaleSelection, quantize_shaped_with},
     nvfp4_policy::{Nvfp4Candidate, Nvfp4Policy},
 };
 use serde_json::{Map, Value, json};
@@ -32,9 +32,19 @@ const REFERENCE_SCHEMA: &str = "transformer-engine-nvfp4-reference-v2";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
-    let usage = "usage: te_reference_from_source <source.safetensors> <reference.safetensors>";
+    let usage = "usage: te_reference_from_source <source.safetensors> <reference.safetensors> [--scale-search RADIUS]";
     let source_path = arguments.next().ok_or(usage)?;
     let reference_path = arguments.next().ok_or(usage)?;
+    // The reference must be derived with the same block-scale rule as the
+    // container it will be compared with.
+    let selection = match arguments.next().as_deref() {
+        None => ScaleSelection::Amax,
+        Some("--scale-search") => {
+            let radius: u8 = arguments.next().ok_or(usage)?.parse()?;
+            ScaleSelection::MinMse { radius }
+        }
+        Some(_) => return Err(usage.into()),
+    };
     if arguments.next().is_some() {
         return Err(usage.into());
     }
@@ -78,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     for (name, shape) in &selected {
         let values: Vec<f32> = source.tensor(name)?.values().collect();
-        let dequantized = quantize_shaped(&values, shape)?.dequantize()?;
+        let dequantized = quantize_shaped_with(&values, shape, selection)?.dequantize()?;
         for value in dequantized {
             writer.write_all(&value.to_le_bytes())?;
         }

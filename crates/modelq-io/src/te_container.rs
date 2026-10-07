@@ -20,14 +20,14 @@ use std::{
 
 use modelq_quant::{
     float::{fp4_e2m1, fp8_e4m3},
-    nvfp4,
+    nvfp4::{self, ScaleSelection},
 };
 use serde_json::Value;
 
 use crate::{
     nvfp4::{
-        Nvfp4Execution, Nvfp4WriterError, TemporaryOutput, create_temporary_file, io_error,
-        json_object, json_shape, json_string_map, paths_refer_to_same_file,
+        Nvfp4Execution, Nvfp4Settings, Nvfp4WriterError, TemporaryOutput, create_temporary_file,
+        io_error, json_object, json_shape, json_string_map, paths_refer_to_same_file,
         stream_quantized_payload,
     },
     safetensors::{MappedSafetensors, SafetensorsError, TensorSource, TensorSummary},
@@ -452,6 +452,7 @@ pub struct TeContainerManifest {
 fn build_manifest(
     summaries: &[TensorSummary],
     plan: &TeOutputPlan,
+    scales: ScaleSelection,
 ) -> Result<String, Nvfp4WriterError> {
     let quantized: BTreeSet<&str> = plan
         .quantized_source_names()
@@ -523,6 +524,13 @@ fn build_manifest(
             .expect("the denominator is finite"),
     );
     manifest.insert("profile_id".to_owned(), Value::String(PROFILE.to_owned()));
+    if !scales.is_default() {
+        // Informational: every selection decodes identically, so a runtime or
+        // validator that ignores this key behaves the same.
+        let mut encoder = BTreeMap::new();
+        encoder.insert("scale_selection".to_owned(), Value::String(scales.label()));
+        manifest.insert("encoder".to_owned(), json_object(encoder));
+    }
     manifest.insert("quantization".to_owned(), json_object(quantization));
     manifest.insert("runtime".to_owned(), json_object(runtime));
     manifest.insert("scale_storage".to_owned(), json_object(scale_storage));
@@ -536,6 +544,7 @@ fn build_header(
     summaries: &[TensorSummary],
     plan: &TeOutputPlan,
     destination: &Path,
+    scales: ScaleSelection,
 ) -> Result<Vec<u8>, Nvfp4WriterError> {
     let mut sorted: Vec<&TensorSummary> = summaries.iter().collect();
     sorted.sort_by(|left, right| left.name.cmp(&right.name));
@@ -543,7 +552,10 @@ fn build_header(
 
     let mut metadata = BTreeMap::new();
     metadata.insert("modelq.format".to_owned(), TE_CONTAINER_FORMAT.to_owned());
-    metadata.insert("modelq.manifest".to_owned(), build_manifest(&sorted, plan)?);
+    metadata.insert(
+        "modelq.manifest".to_owned(),
+        build_manifest(&sorted, plan, scales)?,
+    );
 
     let mut root = BTreeMap::new();
     root.insert(RESERVED_METADATA_NAME.to_owned(), json_string_map(metadata));
@@ -613,6 +625,26 @@ pub fn write_te_nvfp4_safetensors_with(
     destination: impl AsRef<Path>,
     execution: Nvfp4Execution,
 ) -> Result<(), Nvfp4WriterError> {
+    write_te_nvfp4_safetensors_settings(
+        source,
+        plan,
+        destination,
+        Nvfp4Settings {
+            execution,
+            ..Nvfp4Settings::reference()
+        },
+    )
+}
+
+/// Like [`write_te_nvfp4_safetensors`] with explicit execution and block-scale
+/// selection.  A non-default selection is recorded in the manifest as
+/// `encoder.scale_selection`; decoding and the runtime are unaffected.
+pub fn write_te_nvfp4_safetensors_settings(
+    source: &impl TensorSource,
+    plan: &TeOutputPlan,
+    destination: impl AsRef<Path>,
+    settings: Nvfp4Settings,
+) -> Result<(), Nvfp4WriterError> {
     let destination = destination.as_ref().to_owned();
     if destination.file_name().is_none() {
         return Err(Nvfp4WriterError::InvalidDestination { path: destination });
@@ -641,7 +673,7 @@ pub fn write_te_nvfp4_safetensors_with(
         return Err(Nvfp4WriterError::PlanMismatch);
     }
 
-    let header = build_header(&summaries, plan, &destination)?;
+    let header = build_header(&summaries, plan, &destination, settings.scales)?;
     let shapes: BTreeMap<&str, &[usize]> = summaries
         .iter()
         .map(|summary| (summary.name.as_str(), summary.shape.as_slice()))
@@ -652,7 +684,7 @@ pub fn write_te_nvfp4_safetensors_with(
     let write_result = (|| {
         file.write_all(&header)
             .map_err(|source| io_error(&destination, source))?;
-        write_data(&mut file, &destination, source, plan, &shapes, execution)?;
+        write_data(&mut file, &destination, source, plan, &shapes, settings)?;
         file.sync_all()
             .map_err(|source| io_error(&destination, source))
     })();
@@ -674,7 +706,7 @@ fn write_data(
     source: &impl TensorSource,
     plan: &TeOutputPlan,
     shapes: &BTreeMap<&str, &[usize]>,
-    execution: Nvfp4Execution,
+    settings: Nvfp4Settings,
 ) -> Result<(), Nvfp4WriterError> {
     let mut cursor = 0_u64;
     let mut quantized: BTreeMap<String, nvfp4::StreamedQuantization> = BTreeMap::new();
@@ -716,7 +748,7 @@ fn write_data(
                     tensor.byte_len,
                     file,
                     output_path,
-                    execution,
+                    settings,
                 )?;
                 quantized.insert(tensor.source_name.clone(), streamed);
             }

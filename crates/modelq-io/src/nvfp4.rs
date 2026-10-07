@@ -1386,6 +1386,29 @@ pub enum Nvfp4Execution {
     Parallel(ParallelConfig),
 }
 
+/// Execution and scale-selection settings for the NVFP4 writers.
+///
+/// `scales` only changes which block scales the encoder stores; the container
+/// layout is identical, and a non-default choice is recorded in the file
+/// metadata so a reader can tell how the scales were chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nvfp4Settings {
+    /// Sequential or parallel quantization.
+    pub execution: Nvfp4Execution,
+    /// How each block's E4M3 scale is chosen.
+    pub scales: nvfp4::ScaleSelection,
+}
+
+impl Nvfp4Settings {
+    /// The sequential reference path with the reference scale rule.
+    pub const fn reference() -> Self {
+        Self {
+            execution: Nvfp4Execution::Sequential,
+            scales: nvfp4::ScaleSelection::Amax,
+        }
+    }
+}
+
 /// Writes a ModelQ-native NVFP4 SafeTensors file from a checked output plan.
 ///
 /// Runs the sequential reference path; see
@@ -1410,6 +1433,24 @@ pub fn write_nvfp4_safetensors_with(
     plan: &Nvfp4OutputPlan,
     destination: impl AsRef<Path>,
     execution: Nvfp4Execution,
+) -> Result<(), Nvfp4WriterError> {
+    write_nvfp4_safetensors_settings(
+        source,
+        plan,
+        destination,
+        Nvfp4Settings {
+            execution,
+            ..Nvfp4Settings::reference()
+        },
+    )
+}
+
+/// Like [`write_nvfp4_safetensors`] with explicit execution and scale selection.
+pub fn write_nvfp4_safetensors_settings(
+    source: &impl TensorSource,
+    plan: &Nvfp4OutputPlan,
+    destination: impl AsRef<Path>,
+    settings: Nvfp4Settings,
 ) -> Result<(), Nvfp4WriterError> {
     let destination = destination.as_ref().to_owned();
     if destination.file_name().is_none() {
@@ -1436,14 +1477,14 @@ pub fn write_nvfp4_safetensors_with(
         return Err(Nvfp4WriterError::PlanMismatch);
     }
 
-    let header = build_header(&summaries, plan, &destination)?;
+    let header = build_header(&summaries, plan, &destination, settings.scales)?;
     let (temporary_path, mut file) = create_temporary_file(&destination)?;
     let mut temporary = TemporaryOutput::new(temporary_path.clone());
 
     let write_result = (|| {
         file.write_all(&header)
             .map_err(|source| io_error(&destination, source))?;
-        write_data(&mut file, &destination, source, plan, execution)?;
+        write_data(&mut file, &destination, source, plan, settings)?;
         file.sync_all()
             .map_err(|source| io_error(&destination, source))
     })();
@@ -1464,6 +1505,7 @@ fn build_header(
     summaries: &[TensorSummary],
     plan: &Nvfp4OutputPlan,
     destination: &Path,
+    scales: nvfp4::ScaleSelection,
 ) -> Result<Vec<u8>, Nvfp4WriterError> {
     let mut sorted_summaries = summaries.iter().collect::<Vec<_>>();
     sorted_summaries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1577,6 +1619,10 @@ fn build_header(
         MODELQ_ELEMENT_FORMAT.to_owned(),
     );
     metadata.insert("modelq.format".to_owned(), MODELQ_FORMAT.to_owned());
+    if !scales.is_default() {
+        // Informational only: decoding is identical for every selection.
+        metadata.insert("modelq.scale_selection".to_owned(), scales.label());
+    }
     metadata.insert(
         "modelq.format_version".to_owned(),
         MODELQ_FORMAT_VERSION.to_owned(),
@@ -1653,7 +1699,7 @@ pub(crate) fn stream_quantized_payload(
     expected_bytes: u64,
     file: &mut File,
     output_path: &Path,
-    execution: Nvfp4Execution,
+    settings: Nvfp4Settings,
 ) -> Result<nvfp4::StreamedQuantization, Nvfp4WriterError> {
     source
         .with_tensor(
@@ -1666,18 +1712,20 @@ pub(crate) fn stream_quantized_payload(
                     file.write_all(chunk)
                         .map_err(|source| io_error(output_path, source))
                 };
-                let result = match execution {
-                    Nvfp4Execution::Sequential => nvfp4::quantize_replay_chunks(
+                let result = match settings.execution {
+                    Nvfp4Execution::Sequential => nvfp4::quantize_replay_chunks_with(
                         view.shape(),
                         || view.values(),
                         nvfp4::DEFAULT_CHUNK_BLOCKS,
+                        settings.scales,
                         &mut emit,
                     ),
                     Nvfp4Execution::Parallel(config) => {
-                        modelq_backend::nvfp4::quantize_replay_chunks(
+                        modelq_backend::nvfp4::quantize_replay_chunks_with(
                             view.shape(),
                             || view.values(),
                             config,
+                            settings.scales,
                             &mut emit,
                         )
                         .map_err(|error| match error {
@@ -1723,7 +1771,7 @@ fn write_data(
     output_path: &Path,
     source: &impl TensorSource,
     plan: &Nvfp4OutputPlan,
-    execution: Nvfp4Execution,
+    settings: Nvfp4Settings,
 ) -> Result<(), Nvfp4WriterError> {
     let mut cursor = 0_u64;
     let mut quantized_tensors = BTreeMap::new();
@@ -1769,7 +1817,7 @@ fn write_data(
                     tensor.byte_len,
                     file,
                     output_path,
-                    execution,
+                    settings,
                 )?;
                 quantized_tensors.insert(tensor.source_name.clone(), streamed);
             }

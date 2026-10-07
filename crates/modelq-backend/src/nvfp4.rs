@@ -18,8 +18,8 @@
 use std::fmt;
 
 use modelq_quant::nvfp4::{
-    self, BLOCK_SIZE, Nvfp4Error, StreamedQuantization, block_count, encode_chunk, packed_len,
-    scan_chunk_amax,
+    self, BLOCK_SIZE, Nvfp4Error, ScaleSelection, StreamedQuantization, block_count,
+    encode_chunk_with, packed_len, scan_chunk_amax,
 };
 
 use crate::{
@@ -92,6 +92,24 @@ pub fn quantize_replay_chunks<F, I, C, E>(
     shape: &[usize],
     values: F,
     config: ParallelConfig,
+    emit: C,
+) -> Result<StreamedQuantization, Nvfp4ParallelError<E>>
+where
+    F: FnMut() -> I + Send,
+    I: IntoIterator<Item = f32>,
+    C: FnMut(&[u8]) -> Result<(), E>,
+{
+    quantize_replay_chunks_with(shape, values, config, ScaleSelection::default(), emit)
+}
+
+/// [`quantize_replay_chunks`] with an explicit block-scale selection; the
+/// output is bit-identical to [`modelq_quant::nvfp4::quantize_replay_chunks_with`]
+/// for any worker count and chunk size.
+pub fn quantize_replay_chunks_with<F, I, C, E>(
+    shape: &[usize],
+    values: F,
+    config: ParallelConfig,
+    selection: ScaleSelection,
     mut emit: C,
 ) -> Result<StreamedQuantization, Nvfp4ParallelError<E>>
 where
@@ -159,7 +177,15 @@ where
                 let scales =
                     &mut block_scales[first_block..first_block + block_count(buffer.len())];
                 packed.resize(packed_len(buffer.len()), 0);
-                parallel_encode(&buffer, start, global_amax, &mut packed, scales, workers)?;
+                parallel_encode(
+                    &buffer,
+                    start,
+                    global_amax,
+                    selection,
+                    &mut packed,
+                    scales,
+                    workers,
+                )?;
                 start += buffer.len();
                 emit(&packed).map_err(Nvfp4ParallelError::Callback)?;
             }
@@ -217,6 +243,7 @@ fn parallel_encode<E>(
     values: &[f32],
     first_index: usize,
     global_amax: f32,
+    selection: ScaleSelection,
     packed: &mut [u8],
     scales: &mut [u8],
     workers: usize,
@@ -228,10 +255,11 @@ fn parallel_encode<E>(
         .zip(scales.chunks_mut(per_range / BLOCK_SIZE))
         .collect();
     let results = schedule::run_all(items, workers, |index, ((range, packed), scales)| {
-        encode_chunk(
+        encode_chunk_with(
             range,
             first_index + index * per_range,
             global_amax,
+            selection,
             packed,
             scales,
         )
