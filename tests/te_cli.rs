@@ -87,7 +87,7 @@ fn tensors() -> Tensors {
         head: matrix("lm_head.weight", &[64, 64], 2.0),
         stack: matrix("stack.weight", &[4, 64, 64], 3.0),
         odd: matrix("odd.weight", &[70, 64], 4.0),
-        small: matrix("small.weight", &[16, 16], 5.0),
+        small: matrix("small.weight", &[16, 32], 5.0),
         norm: matrix("norm.weight", &[4096], 6.0),
         ids: ("ids", "U8", vec![3], vec![1, 2, 3]),
     }
@@ -171,7 +171,7 @@ fn exports_eligible_matrices_and_preserves_the_rest_with_reasons() {
     let text = stdout(&result);
     assert!(text.contains("2 quantized, 6 preserved"), "{text}");
     assert!(
-        text.contains("rank-2 tensors with both dimensions divisible by 16"),
+        text.contains("a leading dimension divisible by 16 and a final dimension divisible by 32"),
         "{text}"
     );
     assert!(
@@ -184,7 +184,12 @@ fn exports_eligible_matrices_and_preserves_the_rest_with_reasons() {
         "{text}"
     );
     assert!(text.contains("below minimum"), "{text}");
-    assert!(text.contains("not yet hardware-validated"), "{text}");
+    assert!(text.contains("Validated on an NVIDIA B200"), "{text}");
+    assert!(text.contains("not validated"), "{text}");
+    assert!(
+        !text.contains("not yet hardware-validated"),
+        "the stale pre-hardware wording must be gone: {text}"
+    );
 
     let reader = MappedSafetensors::open(&output).unwrap();
     assert_eq!(

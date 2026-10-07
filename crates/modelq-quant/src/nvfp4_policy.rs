@@ -16,6 +16,11 @@ use crate::{
 /// precision, so quantizing them must be an explicit choice.
 pub const DEFAULT_EXCLUDED_NAME_PARTS: &[&str] = &["embed_tokens", "lm_head", "embeddings"];
 
+/// The final dimension a Transformer Engine matrix must be a multiple of.
+/// Measured on a B200 with TE 2.19.0 (ADR 0022): the GEMM succeeded for every
+/// tested multiple of 32 and failed for every other multiple of 16.
+pub const RUNTIME_COLUMN_ALIGNMENT: usize = 32;
+
 /// Metadata consumed by [`Nvfp4Policy`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nvfp4Candidate {
@@ -44,6 +49,11 @@ pub enum Nvfp4Reason {
     /// Flattening the leading dimensions of a stacked weight would share one
     /// amax across its slices.
     RankNotTwo { rank: usize },
+    /// Transformer Engine mode only: the final dimension is a multiple of 16
+    /// but not of 32.  Hardware runs on a Blackwell GPU showed the NVFP4 GEMM
+    /// is rejected for such shapes, consistent with the packed row of
+    /// `final_dimension / 2` bytes needing 16-byte alignment.
+    FinalDimensionNotRuntimeAligned { final_dimension: usize },
     /// Transformer Engine mode only: the product of the leading dimensions is
     /// not a multiple of 16, which Transformer Engine's NVFP4 quantizer
     /// requires in addition to a block-aligned final dimension.
@@ -80,6 +90,10 @@ impl fmt::Display for Nvfp4Reason {
             Self::RankNotTwo { rank } => write!(
                 formatter,
                 "rank {rank} tensors are preserved by the Transformer Engine profile (only rank 2 is exported)"
+            ),
+            Self::FinalDimensionNotRuntimeAligned { final_dimension } => write!(
+                formatter,
+                "final dimension {final_dimension} is not divisible by 32; the Transformer Engine NVFP4 GEMM was rejected for such shapes on a B200"
             ),
             Self::LeadingDimensionNotBlockAligned { rows } => write!(
                 formatter,
@@ -236,6 +250,9 @@ impl Nvfp4Policy {
             let rows = shape[0];
             if rows % BLOCK_SIZE != 0 {
                 return Err(Nvfp4Reason::LeadingDimensionNotBlockAligned { rows });
+            }
+            if final_dimension % RUNTIME_COLUMN_ALIGNMENT != 0 {
+                return Err(Nvfp4Reason::FinalDimensionNotRuntimeAligned { final_dimension });
             }
         }
         let element_count = shape
@@ -420,7 +437,19 @@ mod tests {
         );
         assert!(
             policy
-                .decide(&candidate("w", true, &[144, 80]))
+                .decide(&candidate("w", true, &[144, 96]))
+                .is_quantized()
+        );
+        assert_eq!(
+            reason(&policy, &candidate("k80", true, &[144, 80])),
+            Nvfp4Reason::FinalDimensionNotRuntimeAligned {
+                final_dimension: 80
+            }
+        );
+        // The native policy only needs a multiple of 16.
+        assert!(
+            Nvfp4Policy::default()
+                .decide(&candidate("k80", true, &[144, 80]))
                 .is_quantized()
         );
         assert_eq!(

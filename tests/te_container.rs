@@ -191,6 +191,7 @@ fn rejects_ineligible_selections_and_name_collisions() {
     for (name, shape) in [
         ("rows", vec![70, 64]),
         ("cols", vec![64, 40]),
+        ("cols_not_32", vec![64, 80]),
         ("stack", vec![2, 64, 64]),
     ] {
         let mut candidate = summaries[0].clone();
@@ -330,8 +331,8 @@ fn an_all_zero_matrix_stores_a_zero_amax() {
     let zero: Fixture = (
         "z.weight".to_owned(),
         "F32",
-        vec![16, 16],
-        vec![0; 16 * 16 * 4],
+        vec![16, 32],
+        vec![0; 16 * 32 * 4],
     );
     let path = dir.join("source.safetensors");
     write_source(&path, &[&zero]);
@@ -350,7 +351,7 @@ fn an_all_zero_matrix_stores_a_zero_amax() {
     assert_eq!(te_global_scale(amax), 1.0);
     let decoded: Vec<f32> = te_matrix_values(
         16,
-        16,
+        32,
         &field(&container, "z.weight.rowwise_data"),
         &field(&container, "z.weight.rowwise_scale_inv"),
         amax,

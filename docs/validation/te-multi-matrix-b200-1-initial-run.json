@@ -1,0 +1,169 @@
+{
+  "runs": [
+    {
+      "container": "te-sharded",
+      "exit_code": 1,
+      "stdout": "  pass layers.0.attn.weight [32, 32]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=6.103515625e-05\n  pass layers.0.mlp.up.weight [64, 64]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=9.1552734375e-05\n  pass layers.1.attn.weight [48, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000152587890625\n  fail layers.1.mlp.up.weight [144, 80]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass layers.2.mlp.down.weight [1024, 4096]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.001983642578125\n  pass layers.2.mlp.up.weight [256, 512]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000701904296875\nRESULT_JSON: {\"container\": \"/root/fixtures/te-sharded\", \"environment\": {\"python\": \"3.12.1\", \"pytorch\": \"2.9.0+cu128\", \"cuda_runtime\": \"12.8\", \"cudnn\": 91002, \"driver\": \"580.95.05\", \"transformer_engine\": \"2.19.0\", \"gpu\": \"NVIDIA B200\", \"compute_capability\": \"10.0\"}, \"matrices\": [{\"name\": \"layers.0.attn.weight\", \"shape\": [32, 32], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"layers.0.mlp.up.weight\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 9.1552734375e-05}, {\"name\": \"layers.1.attn.weight\", \"shape\": [48, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000152587890625}, {\"name\": \"layers.1.mlp.up.weight\", \"shape\": [144, 80], \"status\": \"fail\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"layers.2.mlp.down.weight\", \"shape\": [1024, 4096], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.001983642578125}, {\"name\": \"layers.2.mlp.up.weight\", \"shape\": [256, 512], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000701904296875}], \"passed\": false}\n",
+      "stderr": "validation failed: at least one matrix did not pass\n",
+      "outcome": {
+        "container": "/root/fixtures/te-sharded",
+        "environment": {
+          "python": "3.12.1",
+          "pytorch": "2.9.0+cu128",
+          "cuda_runtime": "12.8",
+          "cudnn": 91002,
+          "driver": "580.95.05",
+          "transformer_engine": "2.19.0",
+          "gpu": "NVIDIA B200",
+          "compute_capability": "10.0"
+        },
+        "matrices": [
+          {
+            "name": "layers.0.attn.weight",
+            "shape": [
+              32,
+              32
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "layers.0.mlp.up.weight",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 9.1552734375e-05
+          },
+          {
+            "name": "layers.1.attn.weight",
+            "shape": [
+              48,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000152587890625
+          },
+          {
+            "name": "layers.1.mlp.up.weight",
+            "shape": [
+              144,
+              80
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "layers.2.mlp.down.weight",
+            "shape": [
+              1024,
+              4096
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.001983642578125
+          },
+          {
+            "name": "layers.2.mlp.up.weight",
+            "shape": [
+              256,
+              512
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000701904296875
+          }
+        ],
+        "passed": false
+      }
+    },
+    {
+      "container": "te.safetensors",
+      "exit_code": 1,
+      "stdout": "  pass layers.0.attn.weight [32, 32]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=6.103515625e-05\n  pass layers.0.mlp.up.weight [64, 64]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=9.1552734375e-05\n  pass layers.1.attn.weight [48, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000152587890625\n  fail layers.1.mlp.up.weight [144, 80]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass layers.2.mlp.down.weight [1024, 4096]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.001983642578125\n  pass layers.2.mlp.up.weight [256, 512]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000701904296875\nRESULT_JSON: {\"container\": \"/root/fixtures/te.safetensors\", \"environment\": {\"python\": \"3.12.1\", \"pytorch\": \"2.9.0+cu128\", \"cuda_runtime\": \"12.8\", \"cudnn\": 91002, \"driver\": \"580.95.05\", \"transformer_engine\": \"2.19.0\", \"gpu\": \"NVIDIA B200\", \"compute_capability\": \"10.0\"}, \"matrices\": [{\"name\": \"layers.0.attn.weight\", \"shape\": [32, 32], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"layers.0.mlp.up.weight\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 9.1552734375e-05}, {\"name\": \"layers.1.attn.weight\", \"shape\": [48, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000152587890625}, {\"name\": \"layers.1.mlp.up.weight\", \"shape\": [144, 80], \"status\": \"fail\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"layers.2.mlp.down.weight\", \"shape\": [1024, 4096], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.001983642578125}, {\"name\": \"layers.2.mlp.up.weight\", \"shape\": [256, 512], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000701904296875}], \"passed\": false}\n",
+      "stderr": "validation failed: at least one matrix did not pass\n",
+      "outcome": {
+        "container": "/root/fixtures/te.safetensors",
+        "environment": {
+          "python": "3.12.1",
+          "pytorch": "2.9.0+cu128",
+          "cuda_runtime": "12.8",
+          "cudnn": 91002,
+          "driver": "580.95.05",
+          "transformer_engine": "2.19.0",
+          "gpu": "NVIDIA B200",
+          "compute_capability": "10.0"
+        },
+        "matrices": [
+          {
+            "name": "layers.0.attn.weight",
+            "shape": [
+              32,
+              32
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "layers.0.mlp.up.weight",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 9.1552734375e-05
+          },
+          {
+            "name": "layers.1.attn.weight",
+            "shape": [
+              48,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000152587890625
+          },
+          {
+            "name": "layers.1.mlp.up.weight",
+            "shape": [
+              144,
+              80
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "layers.2.mlp.down.weight",
+            "shape": [
+              1024,
+              4096
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.001983642578125
+          },
+          {
+            "name": "layers.2.mlp.up.weight",
+            "shape": [
+              256,
+              512
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000701904296875
+          }
+        ],
+        "passed": false
+      }
+    }
+  ],
+  "nvidia_smi": "Wed Oct  7 06:59:36 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA B200                    On  |   00000000:52:00.0 Off |                    0 |\n| N/A   36C    P0            244W / 1000W |       6MiB / 183359MiB |      1%      Default |\n|                                         |                        |             Disabled |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|  No running processes found                                                             |\n+-----------------------------------------------------------------------------------------+\n"
+}

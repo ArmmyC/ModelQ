@@ -161,7 +161,7 @@ fn quantize(
 
     let policy = options.policy();
     let shape_rule = if policy.is_transformer_engine() {
-        "rank-2 tensors with both dimensions divisible by 16"
+        "rank-2 tensors with a leading dimension divisible by 16 and a final dimension divisible by 32"
     } else {
         "rank>=2 tensors with a final dimension divisible by 16"
     };
@@ -278,7 +278,7 @@ fn quantize(
                 "ModelQ-native NVFP4 output; no runtime compatibility is implied."
             }
             Nvfp4Profile::TransformerEngine => {
-                "Transformer Engine rowwise NVFP4 container (profile transformer-engine.nvfp4.rowwise.1x16.v1, TE 2.19.0). CPU-validated only: multi-matrix Transformer Engine compatibility is not yet hardware-validated."
+                "Transformer Engine rowwise NVFP4 container (profile transformer-engine.nvfp4.rowwise.1x16.v1, TE 2.19.0). Validated on an NVIDIA B200 for loading each matrix and one TN GEMM per matrix (ADR 0022); other TE versions, GPUs, whole-model loading and inference are not validated."
             }
         },
     };

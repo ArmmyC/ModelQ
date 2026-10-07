@@ -37,7 +37,7 @@ The successful runtime command prints maximum absolute error and Python, PyTorch
 
 ## Multi-matrix container (schema v2, CPU check only)
 
-`modelq quantize <MODEL> --format nvfp4-te --output <PATH>` writes many rank-two matrices into one container (add `--max-shard-size` for shards). See [ADR 0021](../../docs/adr/0021-transformer-engine-multi-matrix-container.md). It is **CPU-validated only**; Transformer Engine compatibility of the multi-matrix schema has not been run on hardware (Task 41).
+`modelq quantize <MODEL> --format nvfp4-te --output <PATH>` writes many rank-two matrices into one container (add `--max-shard-size` for shards). See [ADR 0021](../../docs/adr/0021-transformer-engine-multi-matrix-container.md). The CPU check below needs no GPU. The multi-matrix schema was run on an NVIDIA B200 with Transformer Engine 2.19.0 in Task 41 for the shapes and operation described in [ADR 0022](../../docs/adr/0022-transformer-engine-multi-matrix-hardware-validation.md); exporting requires the final dimension to be divisible by 32 because the GEMM was rejected otherwise.
 
 ```bash
 cargo run -p modelq-io --example te_multi_matrix_fixture -- fixture
@@ -48,4 +48,4 @@ python tools/transformer_engine_nvfp4/validate_multi.py cpu --container fixture/
 python -m unittest discover -s tools/transformer_engine_nvfp4 -p "test_validate*.py"
 ```
 
-The check imports neither Transformer Engine nor PyTorch and creates no CUDA context. It validates the manifest, every field's dtype and shape, zero scale padding, scale and amax validity, and decodes each matrix against the reference. `validate_multi.py runtime` is a placeholder that exits non-zero until Task 41.
+The check imports neither Transformer Engine nor PyTorch and creates no CUDA context. It validates the manifest, every field's dtype and shape, zero scale padding, scale and amax validity, and decodes each matrix against the reference. `validate_multi.py runtime --container PATH --reference REF` is the explicit hardware proof (Linux, pinned TE 2.19.0, Blackwell GPU): per matrix it loads the TE tensor, checks TE's dequantization against the reference, and runs one TN GEMM, continuing after a failure so one run reports every matrix. `modal_runtime_proof.py` runs it on a Modal B200, and `python -m modal run tools/transformer_engine_nvfp4/modal_runtime_proof.py::build_and_prove --name NAME` builds the fixtures and containers on Linux first (this spends Modal GPU time). Use `te_multi_matrix_fixture ... --sweep` to map which shapes the GEMM accepts.

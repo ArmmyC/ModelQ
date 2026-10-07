@@ -1,0 +1,179 @@
+{
+  "fixtures": {
+    "directory": "/built/final",
+    "listing": [
+      "reference.safetensors",
+      "te-sharded",
+      "te.safetensors"
+    ],
+    "fixture_log": "layers.0.attn.weight         eligible with 1024 elements\nlayers.0.mlp.up.weight       eligible with 4096 elements\nlayers.1.attn.weight         eligible with 4608 elements\nlayers.1.mlp.up.weight       eligible with 13824 elements\nlayers.2.mlp.up.weight       eligible with 131072 elements\nlayers.2.mlp.down.weight     eligible with 4194304 elements\nlm_head.weight               name matches excluded pattern \"lm_head\"\nexperts.weight               rank 3 tensors are preserved by the Transformer Engine profile (only rank 2 is exported)\nodd_rows.weight              leading dimensions multiply to 70, which is not divisible by 16 (required by Transformer Engine)\nodd_columns.weight           final dimension 80 is not divisible by 32; the Transformer Engine NVFP4 GEMM was rejected for such shapes on a B200\ntiny.weight                  final dimension 16 is not divisible by 32; the Transformer Engine NVFP4 GEMM was rejected for such shapes on a B200\nnorm.weight                  rank 1 tensors (vectors/scalars) are preserved\ntoken_ids                    non-floating tensors are preserved\nwrote /tmp/fixture/source.safetensors and /tmp/fixture/reference.safetensors\n",
+    "convert_report": "Inspecting source: /tmp/fixture/source.safetensors\nPolicy: floating rank-2 tensors with both dimensions divisible by 16 and at least 1024 elements; excluded name parts: embed_tokens, lm_head, embeddings\nPlanning: 13 source tensors, 6 to quantize, 25 output tensors, 2612251 data bytes\nProgress: 1/13 | experts.weight | preserve (rank 3 tensors are preserved by the Transformer Engine profile (only rank 2 is exported))\nProgress: 2/13 | layers.0.attn.weight | quantize (eligible with 1024 elements)\nProgress: 3/13 | layers.0.mlp.up.weight | quantize (eligible with 4096 elements)\nProgress: 4/13 | layers.1.attn.weight | quantize (eligible with 4608 elements)\nProgress: 5/13 | layers.1.mlp.up.weight | quantize (eligible with 13824 elements)\nProgress: 6/13 | layers.2.mlp.down.weight | quantize (eligible with 4194304 elements)\nProgress: 7/13 | layers.2.mlp.up.weight | quantize (eligible with 131072 elements)\nProgress: 8/13 | lm_head.weight | preserve (name matches excluded pattern \"lm_head\")\nProgress: 9/13 | norm.weight | preserve (rank 1 tensors (vectors/scalars) are preserved)\nProgress: 10/13 | odd_columns.weight | preserve (final dimension 80 is not divisible by 32; the Transformer Engine NVFP4 GEMM was rejected for such shapes on a B200)\nProgress: 11/13 | odd_rows.weight | preserve (leading dimensions multiply to 70, which is not divisible by 16 (required by Transformer Engine))\nProgress: 12/13 | tiny.weight | preserve (final dimension 16 is not divisible by 32; the Transformer Engine NVFP4 GEMM was rejected for such shapes on a B200)\nProgress: 13/13 | token_ids | preserve (non-floating tensors are preserved)\nExecution: parallel, up to 24 workers\nWriting output: /tmp/fixture/te.safetensors\nValidating output by reopening and dequantizing it...\n\nFinal report:\n  Source: /tmp/fixture/source.safetensors\n  Output: /tmp/fixture/te.safetensors\n  Tensors: 6 quantized, 7 preserved\n  Source bytes: 17560155\n  Output bytes: 2617491\n  Size: smaller by 14942664 bytes\n  Validation: passed (reopened and dequantized 6 quantized tensors)\n  Max MSE: 8.546e-1\n  Max MAE: 6.858e-1\n  Max absolute error: 3.834e0\n  Lowest SQNR: 20.40 dB\n  Note: Transformer Engine rowwise NVFP4 container (profile transformer-engine.nvfp4.rowwise.1x16.v1, TE 2.19.0). CPU-validated only: multi-matrix Transformer Engine compatibility is not yet hardware-validated.\n"
+  },
+  "runs": [
+    {
+      "container": "te-sharded",
+      "exit_code": 0,
+      "stdout": "  pass layers.0.attn.weight [32, 32]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=6.103515625e-05\n  pass layers.0.mlp.up.weight [64, 64]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=9.1552734375e-05\n  pass layers.1.attn.weight [48, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000152587890625\n  pass layers.1.mlp.up.weight [144, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000213623046875\n  pass layers.2.mlp.down.weight [1024, 4096]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.001983642578125\n  pass layers.2.mlp.up.weight [256, 512]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000701904296875\nRESULT_JSON: {\"container\": \"/built/final/te-sharded\", \"environment\": {\"python\": \"3.12.1\", \"pytorch\": \"2.9.0+cu128\", \"cuda_runtime\": \"12.8\", \"cudnn\": 91002, \"driver\": \"580.95.05\", \"transformer_engine\": \"2.19.0\", \"gpu\": \"NVIDIA B200\", \"compute_capability\": \"10.0\"}, \"matrices\": [{\"name\": \"layers.0.attn.weight\", \"shape\": [32, 32], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"layers.0.mlp.up.weight\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 9.1552734375e-05}, {\"name\": \"layers.1.attn.weight\", \"shape\": [48, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000152587890625}, {\"name\": \"layers.1.mlp.up.weight\", \"shape\": [144, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000213623046875}, {\"name\": \"layers.2.mlp.down.weight\", \"shape\": [1024, 4096], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.001983642578125}, {\"name\": \"layers.2.mlp.up.weight\", \"shape\": [256, 512], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000701904296875}], \"passed\": true}\nruntime proof passed for every matrix\n",
+      "stderr": "",
+      "outcome": {
+        "container": "/built/final/te-sharded",
+        "environment": {
+          "python": "3.12.1",
+          "pytorch": "2.9.0+cu128",
+          "cuda_runtime": "12.8",
+          "cudnn": 91002,
+          "driver": "580.95.05",
+          "transformer_engine": "2.19.0",
+          "gpu": "NVIDIA B200",
+          "compute_capability": "10.0"
+        },
+        "matrices": [
+          {
+            "name": "layers.0.attn.weight",
+            "shape": [
+              32,
+              32
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "layers.0.mlp.up.weight",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 9.1552734375e-05
+          },
+          {
+            "name": "layers.1.attn.weight",
+            "shape": [
+              48,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000152587890625
+          },
+          {
+            "name": "layers.1.mlp.up.weight",
+            "shape": [
+              144,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000213623046875
+          },
+          {
+            "name": "layers.2.mlp.down.weight",
+            "shape": [
+              1024,
+              4096
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.001983642578125
+          },
+          {
+            "name": "layers.2.mlp.up.weight",
+            "shape": [
+              256,
+              512
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000701904296875
+          }
+        ],
+        "passed": true
+      }
+    },
+    {
+      "container": "te.safetensors",
+      "exit_code": 0,
+      "stdout": "  pass layers.0.attn.weight [32, 32]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=6.103515625e-05\n  pass layers.0.mlp.up.weight [64, 64]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=9.1552734375e-05\n  pass layers.1.attn.weight [48, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000152587890625\n  pass layers.1.mlp.up.weight [144, 96]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000213623046875\n  pass layers.2.mlp.down.weight [1024, 4096]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.001983642578125\n  pass layers.2.mlp.up.weight [256, 512]: dequantize_max_abs_error=1.9073486328125e-06 gemm_max_abs_error=0.000701904296875\nRESULT_JSON: {\"container\": \"/built/final/te.safetensors\", \"environment\": {\"python\": \"3.12.1\", \"pytorch\": \"2.9.0+cu128\", \"cuda_runtime\": \"12.8\", \"cudnn\": 91002, \"driver\": \"580.95.05\", \"transformer_engine\": \"2.19.0\", \"gpu\": \"NVIDIA B200\", \"compute_capability\": \"10.0\"}, \"matrices\": [{\"name\": \"layers.0.attn.weight\", \"shape\": [32, 32], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"layers.0.mlp.up.weight\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 9.1552734375e-05}, {\"name\": \"layers.1.attn.weight\", \"shape\": [48, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000152587890625}, {\"name\": \"layers.1.mlp.up.weight\", \"shape\": [144, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000213623046875}, {\"name\": \"layers.2.mlp.down.weight\", \"shape\": [1024, 4096], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.001983642578125}, {\"name\": \"layers.2.mlp.up.weight\", \"shape\": [256, 512], \"status\": \"pass\", \"dequantize_max_abs_error\": 1.9073486328125e-06, \"gemm_max_abs_error\": 0.000701904296875}], \"passed\": true}\nruntime proof passed for every matrix\n",
+      "stderr": "",
+      "outcome": {
+        "container": "/built/final/te.safetensors",
+        "environment": {
+          "python": "3.12.1",
+          "pytorch": "2.9.0+cu128",
+          "cuda_runtime": "12.8",
+          "cudnn": 91002,
+          "driver": "580.95.05",
+          "transformer_engine": "2.19.0",
+          "gpu": "NVIDIA B200",
+          "compute_capability": "10.0"
+        },
+        "matrices": [
+          {
+            "name": "layers.0.attn.weight",
+            "shape": [
+              32,
+              32
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "layers.0.mlp.up.weight",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 9.1552734375e-05
+          },
+          {
+            "name": "layers.1.attn.weight",
+            "shape": [
+              48,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000152587890625
+          },
+          {
+            "name": "layers.1.mlp.up.weight",
+            "shape": [
+              144,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000213623046875
+          },
+          {
+            "name": "layers.2.mlp.down.weight",
+            "shape": [
+              1024,
+              4096
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.001983642578125
+          },
+          {
+            "name": "layers.2.mlp.up.weight",
+            "shape": [
+              256,
+              512
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 1.9073486328125e-06,
+            "gemm_max_abs_error": 0.000701904296875
+          }
+        ],
+        "passed": true
+      }
+    }
+  ],
+  "nvidia_smi": "Wed Oct  7 07:34:06 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA B200                    On  |   00000000:C0:00.0 Off |                    0 |\n| N/A   38C    P0            245W / 1000W |       6MiB / 183359MiB |      1%      Default |\n|                                         |                        |             Disabled |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|  No running processes found                                                             |\n+-----------------------------------------------------------------------------------------+\n"
+}

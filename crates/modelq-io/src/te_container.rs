@@ -47,6 +47,11 @@ pub const TE_RUNTIME_NAME: &str = "transformer_engine";
 /// The only Transformer Engine release this container targets.
 pub const TE_RUNTIME_VERSION: &str = "2.19.0";
 
+/// Exported matrices need a final dimension divisible by this, measured on
+/// hardware (ADR 0022).  Readers stay format-level and accept any multiple
+/// of 16, so older containers remain readable.
+pub const RUNTIME_COLUMN_ALIGNMENT: usize = 32;
+
 const RESERVED_METADATA_NAME: &str = "__metadata__";
 const U8_DTYPE: &str = "U8";
 const F32_DTYPE: &str = "F32";
@@ -231,6 +236,11 @@ fn validate_matrix(source: &TensorSummary) -> Result<[usize; 2], TeLayoutError> 
     }
     if columns % BLOCK_SIZE != 0 {
         return Err(invalid("the final dimension must be divisible by 16"));
+    }
+    if columns % RUNTIME_COLUMN_ALIGNMENT != 0 {
+        return Err(invalid(
+            "the final dimension must be divisible by 32 (the runtime's GEMM rejects other shapes)",
+        ));
     }
     if rows % BLOCK_SIZE != 0 {
         return Err(invalid("the leading dimension must be divisible by 16"));
