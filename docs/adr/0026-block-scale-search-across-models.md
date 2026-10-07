@@ -4,6 +4,7 @@
 - Date: 2026-10-08
 - Scope: measurement only; no code path changed. The default output and the `--scale-search` behavior are as in ADR 0025
 - Result: **radius 6 lowers the WikiText-2 perplexity increase on all three models tested, by about a fifth (19% to 24% of the loss), and radii 8 and 12 add nothing. Radius-6 containers of the two new models pass the B200 proof (168 of 168 and 196 of 196).**
+- Update: the CLI default became radius 6 in [ADR 0027](0027-scale-search-default.md).
 - Builds on: [ADR 0024](0024-nvfp4-output-quality-qwen2-5-0-5b.md), [ADR 0025](0025-nvfp4-block-scale-search.md)
 
 ## Context

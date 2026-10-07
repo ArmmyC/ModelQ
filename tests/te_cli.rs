@@ -141,6 +141,9 @@ fn run(extra: &[&str], input: &Path, output: &Path) -> Output {
         .arg("quantize")
         .arg(input)
         .args(["--format", "nvfp4-te"])
+        // The tests compare with the library's reference rule; pin it, since the
+        // CLI default is the block-scale search.
+        .args(["--scale-search", "0"])
         .args(extra)
         .arg("--output")
         .arg(output)

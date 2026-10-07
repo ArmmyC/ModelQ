@@ -157,10 +157,18 @@ fn sharded(dir: &TestDir, t: &Tensors) -> PathBuf {
 }
 
 fn run(args: &[&str], input: &Path, output: &Path) -> Output {
+    // These tests compare the CLI with the library's reference rule, so pin it
+    // (the CLI default is the block-scale search); INT8 does not take the flag.
+    let pin: &[&str] = if args.contains(&"int8") {
+        &[]
+    } else {
+        &["--scale-search", "0"]
+    };
     Command::new(env!("CARGO_BIN_EXE_modelq"))
         .arg("quantize")
         .arg(input)
         .args(args)
+        .args(pin)
         .arg("--output")
         .arg(output)
         .output()
