@@ -1,6 +1,6 @@
 # Transformer Engine Multi-Matrix Export
 
-- Status: approved in chat (decisions 1 and 2 below chosen 2026-10-07); written spec awaiting review
+- Status: approved (decisions 1 and 2 chosen 2026-10-07); CPU side implemented in Task 40 (ADR 0021), hardware proof pending (Task 41)
 - Date: 2026-10-07
 - Scope: `modelq quantize --format nvfp4-te`, a SafeTensors container holding many rowwise-NVFP4 matrices for Transformer Engine 2.19.0, plus the validation plan for a later hardware run
 - Related decisions: [ADR 0011](../../adr/0011-nvfp4-native-safetensors-convention.md), [ADR 0012](../../adr/0012-transformer-engine-nvfp4-export-profile.md), [ADR 0013](../../adr/0013-transformer-engine-nvfp4-runtime-container.md), [ADR 0014](../../adr/0014-nvfp4-cli-export.md), [ADR 0015](../../adr/0015-sharded-output.md), [Task 28 design](2026-10-03-transformer-engine-nvfp4-runtime-container-design.md)

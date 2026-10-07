@@ -40,6 +40,14 @@ pub enum Nvfp4Reason {
     RankBelowTwo { rank: usize },
     /// The final dimension is not a multiple of the 16-value block size.
     FinalDimensionNotBlockAligned { final_dimension: usize },
+    /// Transformer Engine mode only: the tensor is not exactly rank two.
+    /// Flattening the leading dimensions of a stacked weight would share one
+    /// amax across its slices.
+    RankNotTwo { rank: usize },
+    /// Transformer Engine mode only: the product of the leading dimensions is
+    /// not a multiple of 16, which Transformer Engine's NVFP4 quantizer
+    /// requires in addition to a block-aligned final dimension.
+    LeadingDimensionNotBlockAligned { rows: usize },
     /// The tensor is smaller than the configured minimum.
     BelowMinimum {
         element_count: usize,
@@ -68,6 +76,14 @@ impl fmt::Display for Nvfp4Reason {
             Self::FinalDimensionNotBlockAligned { final_dimension } => write!(
                 formatter,
                 "final dimension {final_dimension} is not divisible by {BLOCK_SIZE}"
+            ),
+            Self::RankNotTwo { rank } => write!(
+                formatter,
+                "rank {rank} tensors are preserved by the Transformer Engine profile (only rank 2 is exported)"
+            ),
+            Self::LeadingDimensionNotBlockAligned { rows } => write!(
+                formatter,
+                "leading dimensions multiply to {rows}, which is not divisible by {BLOCK_SIZE} (required by Transformer Engine)"
             ),
             Self::BelowMinimum {
                 element_count,
@@ -109,6 +125,7 @@ impl Nvfp4Decision {
 pub struct Nvfp4Policy {
     minimum_elements: usize,
     excluded_name_parts: Vec<String>,
+    transformer_engine: bool,
 }
 
 impl Nvfp4Policy {
@@ -120,7 +137,23 @@ impl Nvfp4Policy {
                 .iter()
                 .map(|part| (*part).to_owned())
                 .collect(),
+            transformer_engine: false,
         }
+    }
+
+    /// Creates the policy for the Transformer Engine rowwise profile: the
+    /// default rules plus exactly rank two and a leading-dimension product
+    /// divisible by 16.
+    pub fn transformer_engine() -> Self {
+        Self {
+            transformer_engine: true,
+            ..Self::new()
+        }
+    }
+
+    /// Returns whether the Transformer Engine rules are active.
+    pub const fn is_transformer_engine(&self) -> bool {
+        self.transformer_engine
     }
 
     /// Removes the built-in name exclusions, keeping any added later.
@@ -195,6 +228,15 @@ impl Nvfp4Policy {
         let final_dimension = shape[shape.len() - 1];
         if final_dimension % BLOCK_SIZE != 0 {
             return Err(Nvfp4Reason::FinalDimensionNotBlockAligned { final_dimension });
+        }
+        if self.transformer_engine {
+            if shape.len() != 2 {
+                return Err(Nvfp4Reason::RankNotTwo { rank: shape.len() });
+            }
+            let rows = shape[0];
+            if rows % BLOCK_SIZE != 0 {
+                return Err(Nvfp4Reason::LeadingDimensionNotBlockAligned { rows });
+            }
         }
         let element_count = shape
             .iter()
@@ -363,5 +405,70 @@ mod tests {
             .map(|decision| decision.name)
             .collect();
         assert_eq!(names, ["b", "a"]);
+    }
+
+    #[test]
+    fn transformer_engine_mode_requires_rank_two_and_aligned_rows() {
+        let policy = Nvfp4Policy::transformer_engine();
+        assert!(policy.is_transformer_engine());
+        assert!(!Nvfp4Policy::new().is_transformer_engine());
+
+        assert!(
+            policy
+                .decide(&candidate("w", true, &[64, 64]))
+                .is_quantized()
+        );
+        assert!(
+            policy
+                .decide(&candidate("w", true, &[144, 80]))
+                .is_quantized()
+        );
+        assert_eq!(
+            reason(&policy, &candidate("experts", true, &[4, 64, 64])),
+            Nvfp4Reason::RankNotTwo { rank: 3 }
+        );
+        assert_eq!(
+            reason(&policy, &candidate("odd_rows", true, &[70, 64])),
+            Nvfp4Reason::LeadingDimensionNotBlockAligned { rows: 70 }
+        );
+        // The native policy still accepts both shapes.
+        let native = Nvfp4Policy::default();
+        assert!(
+            native
+                .decide(&candidate("experts", true, &[4, 64, 64]))
+                .is_quantized()
+        );
+        assert!(
+            native
+                .decide(&candidate("odd_rows", true, &[70, 64]))
+                .is_quantized()
+        );
+    }
+
+    #[test]
+    fn transformer_engine_mode_keeps_the_default_exclusions_and_priorities() {
+        let policy = Nvfp4Policy::transformer_engine();
+        assert!(matches!(
+            reason(&policy, &candidate("lm_head.weight", true, &[64, 64])),
+            Nvfp4Reason::ExcludedByName { .. }
+        ));
+        // Block alignment of the final dimension is reported before the new rules.
+        assert_eq!(
+            reason(&policy, &candidate("w", true, &[4, 64, 40])),
+            Nvfp4Reason::FinalDimensionNotBlockAligned {
+                final_dimension: 40
+            }
+        );
+        assert_eq!(
+            reason(&policy, &candidate("vector", true, &[4096])),
+            Nvfp4Reason::RankBelowTwo { rank: 1 }
+        );
+        let without = Nvfp4Policy::transformer_engine().without_default_exclusions();
+        assert!(without.is_transformer_engine());
+        assert!(
+            without
+                .decide(&candidate("lm_head.weight", true, &[64, 64]))
+                .is_quantized()
+        );
     }
 }

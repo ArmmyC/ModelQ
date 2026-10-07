@@ -1,4 +1,7 @@
-//! `modelq quantize --format nvfp4`: ModelQ-native NVFP4 export.
+//! `modelq quantize --format nvfp4` and `--format nvfp4-te`: NVFP4 export.
+//!
+//! `nvfp4` writes the ModelQ-native container (ADR 0011); `nvfp4-te` writes
+//! the Transformer Engine rowwise container (schema v2, ADR 0021).
 //!
 //! Reads a single or sharded SafeTensors checkpoint, applies [`Nvfp4Policy`],
 //! streams the selected tensors through the bounded NVFP4 quantizer into one
@@ -19,8 +22,12 @@ use modelq::{
             Nvfp4Execution, Nvfp4OutputPlan, Nvfp4OutputRole, plan_nvfp4_output,
             write_nvfp4_safetensors_with,
         },
-        safetensors::{TensorSource, TensorSummary},
+        safetensors::{MappedSafetensors, TensorSource, TensorSummary},
         sharded::SafetensorsInput,
+        te_container::{
+            TeOutputPlan, TeOutputRole, plan_te_output, read_te_container_manifest,
+            te_matrix_values, write_te_nvfp4_safetensors_with,
+        },
     },
     quant::{
         nvfp4::dequantize_iter,
@@ -29,8 +36,53 @@ use modelq::{
     },
 };
 
+/// Which container the command writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nvfp4Profile {
+    /// The ModelQ-native NVFP4 container.
+    Native,
+    /// The Transformer Engine rowwise container (schema v2).
+    TransformerEngine,
+}
+
+/// The planned output of either profile.
+enum Plan {
+    Native(Nvfp4OutputPlan),
+    TransformerEngine(TeOutputPlan),
+}
+
+impl Plan {
+    /// Output tensor count, data-section bytes, and each source's output bytes.
+    fn summary(&self) -> (usize, u64, Vec<(String, u64)>) {
+        let (count, total, pairs): (usize, u64, Vec<(&str, u64)>) = match self {
+            Self::Native(plan) => (
+                plan.tensors.len(),
+                plan.total_data_bytes,
+                plan.tensors
+                    .iter()
+                    .map(|tensor| (tensor.source_name.as_str(), tensor.byte_len))
+                    .collect(),
+            ),
+            Self::TransformerEngine(plan) => (
+                plan.tensors.len(),
+                plan.total_data_bytes,
+                plan.tensors
+                    .iter()
+                    .map(|tensor| (tensor.source_name.as_str(), tensor.byte_len))
+                    .collect(),
+            ),
+        };
+        let mut sized: BTreeMap<String, u64> = BTreeMap::new();
+        for (name, bytes) in pairs {
+            *sized.entry(name.to_owned()).or_default() += bytes;
+        }
+        (count, total, sized.into_iter().collect())
+    }
+}
+
 /// Options that shape the NVFP4 selection policy.
 pub struct Nvfp4Options {
+    pub profile: Nvfp4Profile,
     pub exclude: Vec<String>,
     pub default_excludes: bool,
     /// Worker threads; `None` uses every CPU and `Some(1)` the sequential path.
@@ -53,7 +105,10 @@ impl Nvfp4Options {
     }
 
     fn policy(&self) -> Nvfp4Policy {
-        let mut policy = Nvfp4Policy::new();
+        let mut policy = match self.profile {
+            Nvfp4Profile::Native => Nvfp4Policy::new(),
+            Nvfp4Profile::TransformerEngine => Nvfp4Policy::transformer_engine(),
+        };
         if !self.default_excludes {
             policy = policy.without_default_exclusions();
         }
@@ -75,6 +130,7 @@ struct Nvfp4Report {
     max_mae: f64,
     max_abs_error: f64,
     lowest_sqnr_db: Option<f64>,
+    note: &'static str,
 }
 
 /// Runs the command and prints progress and the final report.
@@ -104,8 +160,13 @@ fn quantize(
         .sum::<Result<u64, String>>()?;
 
     let policy = options.policy();
+    let shape_rule = if policy.is_transformer_engine() {
+        "rank-2 tensors with both dimensions divisible by 16"
+    } else {
+        "rank>=2 tensors with a final dimension divisible by 16"
+    };
     println!(
-        "Policy: floating rank>=2 tensors with a final dimension divisible by 16 and at least {} elements; excluded name parts: {}",
+        "Policy: floating {shape_rule} and at least {} elements; excluded name parts: {}",
         policy.minimum_elements(),
         if policy.excluded_name_parts().is_empty() {
             "none".to_owned()
@@ -127,15 +188,24 @@ fn quantize(
         .filter(|decision| decision.is_quantized())
         .map(|decision| decision.name.clone())
         .collect();
-    let plan = plan_nvfp4_output(&summaries, &selected)
-        .map_err(|error| format!("could not plan output: {error}"))?;
+    let plan = match options.profile {
+        Nvfp4Profile::Native => Plan::Native(
+            plan_nvfp4_output(&summaries, &selected)
+                .map_err(|error| format!("could not plan output: {error}"))?,
+        ),
+        Nvfp4Profile::TransformerEngine => Plan::TransformerEngine(
+            plan_te_output(&summaries, &selected)
+                .map_err(|error| format!("could not plan output: {error}"))?,
+        ),
+    };
+    let (output_tensors, total_data_bytes, sized) = plan.summary();
 
     println!(
         "Planning: {} source tensors, {} to quantize, {} output tensors, {} data bytes",
         summaries.len(),
         selected.len(),
-        plan.tensors.len(),
-        plan.total_data_bytes
+        output_tensors,
+        total_data_bytes
     );
     print_decisions(&decisions);
 
@@ -149,11 +219,6 @@ fn quantize(
         }
     }
     println!("Writing output: {}", target.describe());
-    let mut sized: BTreeMap<String, u64> = BTreeMap::new();
-    for tensor in &plan.tensors {
-        *sized.entry(tensor.source_name.clone()).or_default() += tensor.byte_len;
-    }
-    let sized: Vec<(String, u64)> = sized.into_iter().collect();
     let written = target.write(&source, &sized, |subset, path| {
         let subset_summaries = subset.tensor_summaries();
         let subset_names: BTreeSet<&str> = subset_summaries
@@ -165,17 +230,34 @@ fn quantize(
             .filter(|name| subset_names.contains(name.as_str()))
             .cloned()
             .collect();
-        let subset_plan = plan_nvfp4_output(&subset_summaries, &subset_selected)
-            .map_err(|error| format!("could not plan shard: {error}"))?;
-        write_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
-            .map_err(|error| error.to_string())?;
-        Ok::<_, String>(
-            subset_plan
-                .tensors
-                .iter()
-                .map(|tensor| (tensor.name.clone(), tensor.byte_len))
-                .collect(),
-        )
+        match options.profile {
+            Nvfp4Profile::Native => {
+                let subset_plan = plan_nvfp4_output(&subset_summaries, &subset_selected)
+                    .map_err(|error| format!("could not plan shard: {error}"))?;
+                write_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(
+                    subset_plan
+                        .tensors
+                        .iter()
+                        .map(|tensor| (tensor.name.clone(), tensor.byte_len))
+                        .collect(),
+                )
+            }
+            Nvfp4Profile::TransformerEngine => {
+                let subset_plan = plan_te_output(&subset_summaries, &subset_selected)
+                    .map_err(|error| format!("could not plan shard: {error}"))?;
+                write_te_nvfp4_safetensors_with(subset, &subset_plan, path, execution)
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(
+                    subset_plan
+                        .tensors
+                        .iter()
+                        .map(|tensor| (tensor.name.clone(), tensor.byte_len))
+                        .collect(),
+                )
+            }
+        }
     })?;
 
     println!("Validating output by reopening and dequantizing it...");
@@ -191,8 +273,33 @@ fn quantize(
         max_mae: 0.0,
         max_abs_error: 0.0,
         lowest_sqnr_db: None,
+        note: match options.profile {
+            Nvfp4Profile::Native => {
+                "ModelQ-native NVFP4 output; no runtime compatibility is implied."
+            }
+            Nvfp4Profile::TransformerEngine => {
+                "Transformer Engine rowwise NVFP4 container (profile transformer-engine.nvfp4.rowwise.1x16.v1, TE 2.19.0). CPU-validated only: multi-matrix Transformer Engine compatibility is not yet hardware-validated."
+            }
+        },
     };
-    validate_output(&source, &output_reader, &plan, &summaries, &mut report)?;
+    match &plan {
+        Plan::Native(plan) => {
+            validate_output(&source, &output_reader, plan, &summaries, &mut report)?;
+        }
+        Plan::TransformerEngine(plan) => {
+            for path in written
+                .paths
+                .iter()
+                .filter(|path| !path.to_string_lossy().ends_with(".index.json"))
+            {
+                let file = MappedSafetensors::open(path)
+                    .map_err(|error| format!("could not reopen {}: {error}", path.display()))?;
+                read_te_container_manifest(&file)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+            }
+            validate_te_output(&source, &output_reader, plan, &summaries, &mut report)?;
+        }
+    }
     Ok(report)
 }
 
@@ -338,6 +445,120 @@ fn check_quantized_nvfp4(
         .map_err(|error| format!("could not validate {source_name:?}: {error}"))
 }
 
+fn validate_te_output(
+    source: &impl TensorSource,
+    output: &impl TensorSource,
+    plan: &TeOutputPlan,
+    summaries: &[TensorSummary],
+    report: &mut Nvfp4Report,
+) -> Result<(), String> {
+    let mut expected_names: Vec<&str> = plan
+        .tensors
+        .iter()
+        .map(|tensor| tensor.name.as_str())
+        .collect();
+    let output_summaries = output.tensor_summaries();
+    let mut actual_names: Vec<&str> = output_summaries
+        .iter()
+        .map(|tensor| tensor.name.as_str())
+        .collect();
+    expected_names.sort_unstable();
+    actual_names.sort_unstable();
+    if expected_names != actual_names {
+        return Err("output tensor names do not match the planned layout".to_owned());
+    }
+    let summaries_by_name: BTreeMap<&str, &TensorSummary> = summaries
+        .iter()
+        .map(|summary| (summary.name.as_str(), summary))
+        .collect();
+
+    for tensor in &plan.tensors {
+        match tensor.role {
+            TeOutputRole::Preserved => {
+                let unchanged = output
+                    .with_tensor_bytes(&tensor.name, |output_bytes| {
+                        source.with_tensor_bytes(&tensor.source_name, |source_bytes| {
+                            source_bytes == output_bytes
+                        })
+                    })
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                if !unchanged {
+                    return Err(format!(
+                        "preserved tensor {:?} changed during writing",
+                        tensor.source_name
+                    ));
+                }
+                report.preserved_tensors += 1;
+            }
+            TeOutputRole::RowwiseData => {
+                let summary = summaries_by_name
+                    .get(tensor.source_name.as_str())
+                    .ok_or_else(|| format!("missing source tensor {:?}", tensor.source_name))?;
+                let [rows, columns] = summary.shape[..] else {
+                    return Err(format!("{:?} is not rank two", tensor.source_name));
+                };
+                let scale_name = format!("{}.rowwise_scale_inv", tensor.source_name);
+                let amax_name = format!("{}.amax_rowwise", tensor.source_name);
+                let metrics = output
+                    .with_tensor_bytes(&tensor.name, |data| {
+                        output.with_tensor_bytes(&scale_name, |scales| {
+                            output.with_tensor_bytes(&amax_name, |amax| {
+                                check_quantized_te(
+                                    source,
+                                    &tensor.source_name,
+                                    (rows, columns),
+                                    data,
+                                    scales,
+                                    amax,
+                                )
+                            })
+                        })
+                    })
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())??;
+                report.quantized_tensors += 1;
+                report.max_mse = report.max_mse.max(metrics.mse);
+                report.max_mae = report.max_mae.max(metrics.mae);
+                report.max_abs_error = report.max_abs_error.max(metrics.max_abs_error);
+                if let Some(sqnr_db) = metrics.sqnr_db {
+                    report.lowest_sqnr_db = Some(
+                        report
+                            .lowest_sqnr_db
+                            .map_or(sqnr_db, |current| current.min(sqnr_db)),
+                    );
+                }
+            }
+            TeOutputRole::RowwiseScaleInv | TeOutputRole::AmaxRowwise => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_quantized_te(
+    source: &impl TensorSource,
+    source_name: &str,
+    (rows, columns): (usize, usize),
+    data: &[u8],
+    scales: &[u8],
+    amax_bytes: &[u8],
+) -> Result<modelq::diagnostics::ReconstructionMetrics, String> {
+    let amax = f32::from_le_bytes(
+        amax_bytes
+            .try_into()
+            .map_err(|_| format!("amax of {source_name:?} has {} bytes", amax_bytes.len()))?,
+    );
+    let reconstructed = te_matrix_values(rows, columns, data, scales, amax)
+        .map_err(|error| format!("{source_name:?}: {error}"))?;
+    source
+        .with_tensor(source_name, |view| {
+            reconstruction_metrics_streaming(view.values(), reconstructed)
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("could not validate {source_name:?}: {error}"))
+}
+
 fn print_report(report: &Nvfp4Report) {
     println!();
     println!("Final report:");
@@ -371,5 +592,5 @@ fn print_report(report: &Nvfp4Report) {
         Some(sqnr_db) => println!("  Lowest SQNR: {sqnr_db:.2} dB"),
         None => println!("  Lowest SQNR: undefined"),
     }
-    println!("  Note: ModelQ-native NVFP4 output; no runtime compatibility is implied.");
+    println!("  Note: {}", report.note);
 }

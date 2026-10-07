@@ -34,3 +34,18 @@ The runtime command validates the files before CUDA work and rejects unsupported
 `general_gemm(weight, second_operand, layout="TN")` follows TE 2.19's convention: `second_operand @ weight.T`. The F32 GEMM result is compared with `TE-dequantized second operand @ ModelQ-dequantized exported weight.T` using `rtol=0.125`, `atol=0.0675`; output must be finite and `[64,64]`. TE handles runtime layout preparation without rewriting the artifact.
 
 The successful runtime command prints maximum absolute error and Python, PyTorch, CUDA runtime, cuDNN, driver, TE, GPU, and compute-capability versions. The recorded NVIDIA B200 run reported `max_abs_error=0.000152587890625` and passed the artifact dequantization comparison and single TN GEMM checks. Failures return nonzero; an unavailable GPU is not a pass. This validation does not cover other shapes, layouts, TE versions, hardware, or complete models.
+
+## Multi-matrix container (schema v2, CPU check only)
+
+`modelq quantize <MODEL> --format nvfp4-te --output <PATH>` writes many rank-two matrices into one container (add `--max-shard-size` for shards). See [ADR 0021](../../docs/adr/0021-transformer-engine-multi-matrix-container.md). It is **CPU-validated only**; Transformer Engine compatibility of the multi-matrix schema has not been run on hardware (Task 41).
+
+```bash
+cargo run -p modelq-io --example te_multi_matrix_fixture -- fixture
+cargo run --bin modelq -- quantize fixture/source.safetensors --format nvfp4-te --output fixture/te.safetensors
+cargo run --bin modelq -- quantize fixture/source.safetensors --format nvfp4-te --max-shard-size 2MB --output fixture/te-sharded
+python tools/transformer_engine_nvfp4/validate_multi.py cpu --container fixture/te.safetensors --reference fixture/reference.safetensors
+python tools/transformer_engine_nvfp4/validate_multi.py cpu --container fixture/te-sharded --reference fixture/reference.safetensors
+python -m unittest discover -s tools/transformer_engine_nvfp4 -p "test_validate*.py"
+```
+
+The check imports neither Transformer Engine nor PyTorch and creates no CUDA context. It validates the manifest, every field's dtype and shape, zero scale padding, scale and amax validity, and decodes each matrix against the reference. `validate_multi.py runtime` is a placeholder that exits non-zero until Task 41.
