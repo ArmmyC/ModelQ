@@ -1,0 +1,142 @@
+{
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "license": "apache-2.0",
+    "weights_sha256": "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe"
+  },
+  "dataset": {
+    "id": "Salesforce/wikitext",
+    "file": "wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "license": [
+      "cc-by-sa-3.0",
+      "gfdl"
+    ],
+    "sha256": "5f1bea067869d04849c0f975a2b29c4ff47d867f484f5010ea5e861eab246d91"
+  },
+  "text": {
+    "characters": 1294336,
+    "tokens": 299078,
+    "window": 2048,
+    "windows": 146,
+    "tokens_scored": 298862
+  },
+  "variants": {
+    "qwen2.5-0.5b-instruct-r0": {
+      "container": "/built/qwen2.5-0.5b-instruct-r0/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.09438250794829357,
+        "relative_frobenius_error_median": 0.09445957094430923,
+        "relative_frobenius_error_max": 0.09552972763776779
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 16.045005020228007,
+        "mean_kl_original_to_quantized": 0.11810368946423465,
+        "top1_agreement": 0.8235975132335326,
+        "relative_perplexity_increase": 0.12655759473772213
+      }
+    },
+    "qwen2.5-0.5b-instruct-r1": {
+      "container": "/built/qwen2.5-0.5b-instruct-r1/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08616279305091926,
+        "relative_frobenius_error_median": 0.08617556095123291,
+        "relative_frobenius_error_max": 0.08704225718975067
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 15.898452171775084,
+        "mean_kl_original_to_quantized": 0.10436246946216018,
+        "top1_agreement": 0.8298846959466242,
+        "relative_perplexity_increase": 0.11626777405851729
+      }
+    },
+    "qwen2.5-0.5b-instruct-r4": {
+      "container": "/built/qwen2.5-0.5b-instruct-r4/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.083400750577095,
+        "relative_frobenius_error_median": 0.08336306363344193,
+        "relative_frobenius_error_max": 0.0860690101981163
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 15.882598131019364,
+        "mean_kl_original_to_quantized": 0.1011998153203684,
+        "top1_agreement": 0.8312699506795779,
+        "relative_perplexity_increase": 0.1151546245145863
+      }
+    },
+    "qwen2.5-0.5b-instruct-r6": {
+      "container": "/built/qwen2.5-0.5b-instruct-r6/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08150008906211172,
+        "relative_frobenius_error_median": 0.08141393214464188,
+        "relative_frobenius_error_max": 0.08511229604482651
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 15.612903836940024,
+        "mean_kl_original_to_quantized": 0.09315210962671115,
+        "top1_agreement": 0.8408964672658283,
+        "relative_perplexity_increase": 0.09621875289164357
+      }
+    },
+    "qwen2.5-0.5b-instruct-r8": {
+      "container": "/built/qwen2.5-0.5b-instruct-r8/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08149991264300686,
+        "relative_frobenius_error_median": 0.08141376078128815,
+        "relative_frobenius_error_max": 0.08511229604482651
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 15.613977368895446,
+        "mean_kl_original_to_quantized": 0.09322466914643615,
+        "top1_agreement": 0.8408395848251032,
+        "relative_perplexity_increase": 0.09629412809882172
+      }
+    },
+    "qwen2.5-0.5b-instruct-r12": {
+      "container": "/built/qwen2.5-0.5b-instruct-r12/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08149991264300686,
+        "relative_frobenius_error_median": 0.08141376078128815,
+        "relative_frobenius_error_max": 0.08511229604482651
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 14.242507524849186,
+        "perplexity_quantized": 15.613977368895446,
+        "mean_kl_original_to_quantized": 0.09322466914643615,
+        "top1_agreement": 0.8408395848251032,
+        "relative_perplexity_increase": 0.09629412809882172
+      }
+    }
+  },
+  "environment": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.6",
+    "gpu": "NVIDIA L4",
+    "dtype": "float32"
+  },
+  "seconds": 1056.4
+}

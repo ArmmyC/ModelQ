@@ -63,7 +63,7 @@ def _download_verified(url: str, destination: pathlib.Path, expected_sha256: str
 
 
 @app.function(image=image, gpu="L4", timeout=3600, volumes={BUILT_ROOT: volume})
-def evaluate(names: list[str]) -> dict:
+def evaluate(names: list[str], model: str = MODEL) -> dict:
     """Downloads the pinned model and dataset, then compares original and each NVFP4 container on WikiText-2."""
     import sys
 
@@ -85,18 +85,18 @@ def evaluate(names: list[str]) -> dict:
             raise RuntimeError(f"{container} not found; run modal_runtime_proof.py::validate_model first")
 
     # --- model files, pinned and verified -------------------------------------------------
-    model_api = _api(f"models/{MODEL}?blobs=true")
+    model_api = _api(f"models/{model}?blobs=true")
     revision = model_api["sha"]
     license_id = (model_api.get("cardData") or {}).get("license")
     if license_id not in ALLOWED_LICENSES or model_api.get("gated"):
-        raise RuntimeError(f"{MODEL} must be an ungated Apache-2.0 or MIT model")
+        raise RuntimeError(f"{model} must be an ungated Apache-2.0 or MIT model")
     weights = next(f for f in model_api["siblings"] if f["rfilename"] == "model.safetensors")
     local = pathlib.Path("/tmp/model")
     local.mkdir()
     for filename in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
                      "vocab.json", "merges.txt"):
-        hf_hub_download(MODEL, filename, revision=revision, local_dir=local)
-    _download_verified(f"{HF}/{MODEL}/resolve/{revision}/model.safetensors",
+        hf_hub_download(model, filename, revision=revision, local_dir=local)
+    _download_verified(f"{HF}/{model}/resolve/{revision}/model.safetensors",
                        local / "model.safetensors", weights["lfs"]["sha256"])
 
     # --- dataset, pinned and verified -----------------------------------------------------
@@ -133,7 +133,7 @@ def evaluate(names: list[str]) -> dict:
         raise RuntimeError(f"implausible baseline perplexity {baseline}")
 
     return {
-        "model": {"id": MODEL, "revision": revision, "license": license_id,
+        "model": {"id": model, "revision": revision, "license": license_id,
                   "weights_sha256": weights["lfs"]["sha256"]},
         "dataset": {"id": DATASET, "file": DATASET_FILE, "revision": data_revision,
                     "license": data_license, "sha256": entry["lfs"]["sha256"]},
@@ -147,9 +147,9 @@ def evaluate(names: list[str]) -> dict:
 
 
 @app.local_entrypoint()
-def main(names: str = "qwen2.5-0.5b") -> None:
+def main(names: str = "qwen2.5-0.5b", model: str = MODEL) -> None:
     listed = [part for part in names.split(",") if part]
-    result = evaluate.remote(listed)
+    result = evaluate.remote(listed, model)
     results = REPO / "modal_results"
     results.mkdir(exist_ok=True)
     path = results / f"{listed[0]}-quality.json"
