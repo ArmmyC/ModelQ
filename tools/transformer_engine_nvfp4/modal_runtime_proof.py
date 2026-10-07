@@ -29,11 +29,14 @@ image build and is cached by Modal for later runs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import shutil
 import subprocess
+import time
+import urllib.request
 
 import modal
 
@@ -125,6 +128,76 @@ def build_fixtures(name: str = "final", sweep: bool = False) -> dict:
             "fixture_log": generated, "convert_report": report}
 
 
+ALLOWED_LICENSES = {"apache-2.0", "mit"}
+HF = "https://huggingface.co"
+
+
+@app.function(image=rust_image, cpu=8, memory=32768, timeout=7200, volumes={BUILT_ROOT: volume})
+def fetch_and_convert(model: str, name: str) -> dict:
+    """Downloads a model's `model.safetensors` and converts it, on Linux in Modal.
+
+    The download is pinned to the repository's current commit and its SHA-256
+    is checked against the value Hugging Face publishes, and only permissively
+    licensed models are accepted.  The converted containers and the reference
+    (re-quantized from the source weights by the native quantizer) are written
+    to the volume directory `name`; the source weights are not kept.
+    """
+    started = time.time()
+    with urllib.request.urlopen(f"{HF}/api/models/{model}?blobs=true") as response:
+        api = json.load(response)
+    revision = api["sha"]
+    license_id = (api.get("cardData") or {}).get("license")
+    if license_id not in ALLOWED_LICENSES:
+        raise RuntimeError(f"{model} has license {license_id!r}; only {sorted(ALLOWED_LICENSES)} are accepted")
+    if api.get("gated"):
+        raise RuntimeError(f"{model} is gated")
+    entry = next((f for f in api["siblings"] if f["rfilename"] == "model.safetensors"), None)
+    if entry is None:
+        raise RuntimeError(f"{model} has no single model.safetensors file")
+    expected = entry["lfs"]["sha256"]
+
+    source = pathlib.Path("/tmp/model.safetensors")
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(f"{HF}/{model}/resolve/{revision}/model.safetensors") as response, source.open("wb") as handle:
+        while chunk := response.read(1 << 20):
+            digest.update(chunk)
+            handle.write(chunk)
+    if digest.hexdigest() != expected:
+        raise RuntimeError(f"sha256 mismatch for {model}@{revision}: {digest.hexdigest()} != {expected}")
+    size = source.stat().st_size
+
+    def run(*command: str) -> str:
+        completed = subprocess.run(
+            command, cwd="/repo", capture_output=True, text=True, check=False,
+            env={**os.environ, "CARGO_TERM_COLOR": "never"},
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(" ".join(command) + " failed:" + chr(10) + completed.stdout[-2000:] + chr(10) + completed.stderr[-4000:])
+        return completed.stdout
+
+    out = pathlib.Path(BUILT_ROOT) / name
+    if out.exists():
+        raise RuntimeError(f"{out} already exists; choose another --name")
+    scratch = pathlib.Path("/tmp/model-out")
+    scratch.mkdir()
+    reference_log = run(
+        "cargo", "run", "-q", "--release", "-p", "modelq-io", "--example",
+        "te_reference_from_source", "--", str(source), str(scratch / "reference.safetensors"),
+    )
+    convert = ["cargo", "run", "-q", "--release", "--bin", "modelq", "--", "quantize", str(source),
+               "--format", "nvfp4-te"]
+    single_report = run(*convert, "--output", str(scratch / "te.safetensors"))
+    run(*convert, "--max-shard-size", "128MB", "--output", str(scratch / "te-sharded"))
+    shutil.copytree(scratch, out)
+    volume.commit()
+    return {
+        "model": model, "revision": revision, "license": license_id, "source_bytes": size,
+        "source_sha256": expected, "directory": str(out), "listing": sorted(p.name for p in out.iterdir()),
+        "reference_log": reference_log.strip(), "convert_report": single_report,
+        "seconds": round(time.time() - started, 1),
+    }
+
+
 @app.function(image=rust_image, cpu=8, memory=16384, timeout=3600)
 def verify_repo() -> dict:
     """Runs the formatting check and the whole Rust test suite on Linux (Rust 1.85, CPU only)."""
@@ -152,7 +225,7 @@ def verify_repo() -> dict:
 @app.function(
     image=image,
     gpu="B200",
-    timeout=900,
+    timeout=3600,
     startup_timeout=300,
     max_containers=1,
     retries=0,
@@ -257,4 +330,38 @@ def verify() -> None:
         if step["exit_code"] != 0:
             print(step["tail"])
     if any(step["exit_code"] != 0 for step in steps.values()):
+        raise SystemExit(1)
+
+
+@app.local_entrypoint()
+def validate_model(model: str = "Qwen/Qwen2.5-0.5B", name: str = "qwen2.5-0.5b") -> None:
+    """Downloads `model` inside Modal, converts it, and proves every exported matrix on a B200."""
+    built = fetch_and_convert.remote(model, name)
+    print(f"{built['model']}@{built['revision']} ({built['license']}, {built['source_bytes']} bytes) "
+          f"converted in {built['seconds']} s: {built['listing']}")
+    print(built["reference_log"])
+    print(built["convert_report"][-1800:])
+    result = prove.remote(built["directory"])
+    results = REPO / "modal_results"
+    results.mkdir(exist_ok=True)
+    (results / f"{name}.json").write_text(
+        json.dumps({"model": built, **result}, indent=2), encoding="utf-8"
+    )
+    failed = False
+    for run in result["runs"]:
+        outcome = run["outcome"]
+        print(f"== {run['container']}: exit code {run['exit_code']}")
+        if outcome:
+            matrices = outcome["matrices"]
+            passed = sum(1 for m in matrices if m["status"] == "pass")
+            print(f"   {passed}/{len(matrices)} matrices passed; environment {outcome['environment']}")
+            for record in matrices:
+                if record["status"] != "pass":
+                    print(f"   FAIL {record['name']} {record['shape']}: {record.get('detail')}")
+        if run["stderr"].strip():
+            print("-- stderr --")
+            print(run["stderr"])
+        failed = failed or run["exit_code"] != 0
+    print(f"result written to {results / (name + '.json')}")
+    if failed:
         raise SystemExit(1)
