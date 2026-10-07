@@ -315,19 +315,16 @@ fn the_cli_flag_works_for_both_formats_and_is_deterministic() {
     );
 
     for format in ["nvfp4", "nvfp4-te"] {
-        let default = dir.join(&format!("{format}-default.safetensors"));
-        let default_run = run(format, &[], &source, &default);
-        assert!(default_run.status.success(), "{format}: {default_run:?}");
-
-        let zero = dir.join(&format!("{format}-zero.safetensors"));
+        // Radius 0 is the reference rule and must equal the library's output.
+        let reference = dir.join(&format!("{format}-reference.safetensors"));
+        let reference_run = run(format, &["--scale-search", "0"], &source, &reference);
         assert!(
-            run(format, &["--scale-search", "0"], &source, &zero)
-                .status
-                .success()
+            reference_run.status.success(),
+            "{format}: {reference_run:?}"
         );
-        assert_eq!(
-            fs::read(&zero).unwrap(),
-            fs::read(&default).unwrap(),
+        assert!(
+            String::from_utf8_lossy(&reference_run.stdout)
+                .contains("Block scales: amax (reference rule)"),
             "{format}"
         );
 
@@ -343,8 +340,22 @@ fn the_cli_flag_works_for_both_formats_and_is_deterministic() {
             String::from_utf8_lossy(&searched_run.stdout).contains("Block scales: min-mse:r6"),
             "{format}"
         );
-        assert!(report_value(&searched_run, "Max MSE:") < report_value(&default_run, "Max MSE:"));
-        assert_ne!(fs::read(&searched).unwrap(), fs::read(&default).unwrap());
+        assert!(report_value(&searched_run, "Max MSE:") < report_value(&reference_run, "Max MSE:"));
+        assert_ne!(fs::read(&searched).unwrap(), fs::read(&reference).unwrap());
+
+        // Without the flag the CLI uses radius 6.
+        let implicit = dir.join(&format!("{format}-implicit.safetensors"));
+        let implicit_run = run(format, &[], &source, &implicit);
+        assert!(implicit_run.status.success(), "{format}: {implicit_run:?}");
+        assert!(
+            String::from_utf8_lossy(&implicit_run.stdout).contains("Block scales: min-mse:r6"),
+            "{format}"
+        );
+        assert_eq!(
+            fs::read(&implicit).unwrap(),
+            fs::read(&searched).unwrap(),
+            "{format}: the default must equal --scale-search 6"
+        );
 
         let expected = fs::read(&searched).unwrap();
         for threads in ["2", "8"] {

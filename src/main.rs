@@ -139,7 +139,7 @@ fn build_cli() -> Command {
                         .value_name("RADIUS")
                         .value_parser(value_parser!(u8).range(0..=32))
                         .help(
-                            "nvfp4 formats only: pick each block's E4M3 scale by minimum error within RADIUS codes of the default (0 = default rule)",
+                            "nvfp4 formats only: pick each block's E4M3 scale by minimum error within RADIUS codes of the reference rule (default: 6; 0 = the reference rule alone)",
                         ),
                 )
                 .arg(

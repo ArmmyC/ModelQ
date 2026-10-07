@@ -115,8 +115,10 @@ def build_fixtures(name: str = "final", sweep: bool = False) -> dict:
         "te_multi_matrix_fixture", "--", str(scratch), *(["--sweep"] if sweep else []),
     )
     source = scratch / "source.safetensors"
+    # The fixture generator derives its reference with the reference rule, so pin it
+    # (the CLI default is the block-scale search).
     convert = ["cargo", "run", "-q", "--release", "--bin", "modelq", "--", "quantize", str(source),
-               "--format", "nvfp4-te"]
+               "--format", "nvfp4-te", "--scale-search", "0"]
     report = run(*convert, "--output", str(scratch / "te.safetensors"))
     if not sweep:
         run(*convert, "--max-shard-size", "2MB", "--output", str(scratch / "te-sharded"))
@@ -129,6 +131,8 @@ def build_fixtures(name: str = "final", sweep: bool = False) -> dict:
 
 
 ALLOWED_LICENSES = {"apache-2.0", "mit"}
+# The block-scale search radius `modelq quantize` uses without --scale-search.
+CLI_DEFAULT_SCALE_SEARCH = 6
 HF = "https://huggingface.co"
 
 
@@ -183,7 +187,9 @@ def fetch_and_convert(model: str, name: str) -> dict:
     reference_log = run(
         "cargo", "run", "-q", "--release", "-p", "modelq-io", "--example",
         "te_reference_from_source", "--", str(source), str(scratch / "reference.safetensors"),
+        "--scale-search", str(CLI_DEFAULT_SCALE_SEARCH),
     )
+    # No --scale-search here: this converts with the CLI default, which is what is proven.
     convert = ["cargo", "run", "-q", "--release", "--bin", "modelq", "--", "quantize", str(source),
                "--format", "nvfp4-te"]
     single_report = run(*convert, "--output", str(scratch / "te.safetensors"))

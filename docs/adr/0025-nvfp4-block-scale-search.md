@@ -4,6 +4,7 @@
 - Date: 2026-10-07
 - Scope: an opt-in encoder mode, `--scale-search <RADIUS>`, that chooses each block's E4M3 scale by minimum reconstruction error; the default output is unchanged
 - Result: **on Qwen2.5-0.5B, radius 6 cuts the WikiText-2 perplexity increase from +9.93% to +8.07% (about a fifth of the loss), at roughly 1.2x the wall-clock time of the default when run in parallel; the container passes the B200 proof 168 of 168.**
+- Update: the CLI default became radius 6 in [ADR 0027](0027-scale-search-default.md); `--scale-search 0` is the reference rule described here as the default.
 - Builds on: [ADR 0010](0010-nvfp4-research-spike.md), [ADR 0021](0021-transformer-engine-multi-matrix-container.md), [ADR 0024](0024-nvfp4-output-quality-qwen2-5-0-5b.md)
 
 ## Context

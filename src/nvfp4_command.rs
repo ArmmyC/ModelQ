@@ -80,6 +80,14 @@ impl Plan {
     }
 }
 
+/// Block-scale search radius used when `--scale-search` is not given.
+///
+/// Radius 6 lowered the WikiText-2 perplexity loss by about a fifth on three
+/// Qwen2.5 models and larger radii added nothing (ADR 0026, ADR 0027).
+/// `--scale-search 0` selects the reference rule.  The library keeps the
+/// reference rule as its own default.
+pub const DEFAULT_SCALE_SEARCH_RADIUS: u8 = 6;
+
 /// Options that shape the NVFP4 selection policy.
 pub struct Nvfp4Options {
     pub profile: Nvfp4Profile,
@@ -87,7 +95,8 @@ pub struct Nvfp4Options {
     pub default_excludes: bool,
     /// Worker threads; `None` uses every CPU and `Some(1)` the sequential path.
     pub threads: Option<usize>,
-    /// Block-scale search radius in E4M3 codes; `None` or `Some(0)` is the default rule.
+    /// Block-scale search radius in E4M3 codes. `None` uses
+    /// [`DEFAULT_SCALE_SEARCH_RADIUS`]; `Some(0)` selects the reference rule.
     pub scale_search: Option<u8>,
 }
 
@@ -107,9 +116,9 @@ impl Nvfp4Options {
     }
 
     fn scales(&self) -> ScaleSelection {
-        match self.scale_search {
-            Some(radius) if radius > 0 => ScaleSelection::MinMse { radius },
-            _ => ScaleSelection::Amax,
+        match self.scale_search.unwrap_or(DEFAULT_SCALE_SEARCH_RADIUS) {
+            0 => ScaleSelection::Amax,
+            radius => ScaleSelection::MinMse { radius },
         }
     }
 
@@ -231,7 +240,9 @@ fn quantize(
             );
         }
     }
-    if !settings.scales.is_default() {
+    if settings.scales.is_default() {
+        println!("Block scales: {} (reference rule)", settings.scales.label());
+    } else {
         println!(
             "Block scales: {} (minimum-error search)",
             settings.scales.label()

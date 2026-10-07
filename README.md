@@ -183,16 +183,24 @@ and 83.5% top-1 agreement. This is one model, one text and weight-only
 simulated quantization in float32, with no comparison to other methods; see
 [ADR 0024](docs/adr/0024-nvfp4-output-quality-qwen2-5-0-5b.md).
 
-Task 44 adds an opt-in block-scale search, `--scale-search <RADIUS>` for
+Task 44 adds a block-scale search, `--scale-search <RADIUS>` for
 `--format nvfp4` and `nvfp4-te`: each 16-value block's E4M3 scale is chosen by
-minimum reconstruction error among the codes within RADIUS of the default
+minimum reconstruction error among the codes within RADIUS of the reference
 rule, instead of from the block's largest value alone. Only the stored scale
-bytes change, so decoders and the Transformer Engine runtime are unaffected,
-and the default output is byte-identical to before. On Qwen2.5-0.5B, radius 6
-reduced the WikiText-2 perplexity increase from +9.93% to +8.07%, passed the
-B200 proof (168/168 matrices), and cost about 1.2x wall time in parallel (8x on
-one thread). One model, one text; see
-[ADR 0025](docs/adr/0025-nvfp4-block-scale-search.md).
+bytes change, so decoders and the Transformer Engine runtime are unaffected.
+On three Qwen2.5 models (0.5B, 0.5B-Instruct and 1.5B), radius 6 reduced the
+WikiText-2 perplexity increase by 19% to 24% (for example +9.93% to +8.07% on
+0.5B), passed the B200 proof on all three, and cost about 1.2x wall time in
+parallel (8x on one thread); larger radii added nothing. One model family, one
+text; see [ADR 0025](docs/adr/0025-nvfp4-block-scale-search.md) and
+[ADR 0026](docs/adr/0026-block-scale-search-across-models.md).
+
+Task 46 makes radius 6 the CLI default, so `modelq quantize --format nvfp4`
+and `nvfp4-te` now use the search without a flag. `--scale-search 0` selects
+the reference rule and reproduces the output of earlier versions byte for byte;
+`--threads 1` is noticeably slower with the search. The library API keeps the
+reference rule as its default. See
+[ADR 0027](docs/adr/0027-scale-search-default.md).
 
 ## Requirements
 
