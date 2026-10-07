@@ -164,6 +164,17 @@ operation and shapes are validated; no model loading or inference). See
 [ADR 0022](docs/adr/0022-transformer-engine-multi-matrix-hardware-validation.md)
 and the [tool README](tools/transformer_engine_nvfp4/README.md).
 
+Task 42 validated the Transformer Engine export on a real checkpoint:
+`Qwen/Qwen2.5-0.5B` (Apache-2.0, BF16, 988 MB) was downloaded and
+hash-checked inside Modal, converted with `--format nvfp4-te` (474 MB, with the
+tied embedding preserved), and all 168 exported matrices loaded into
+Transformer Engine 2.19.0 on an NVIDIA B200, dequantized to a reference
+re-quantized independently from the source weights, and passed one TN GEMM,
+in both single-file and sharded form. This checks that the container and
+runtime agree on real shapes; it does not measure model-output quality (no
+inference was run). See
+[ADR 0023](docs/adr/0023-real-model-validation-qwen2-5-0-5b.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
