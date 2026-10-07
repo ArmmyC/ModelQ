@@ -175,6 +175,14 @@ runtime agree on real shapes; it does not measure model-output quality (no
 inference was run). See
 [ADR 0023](docs/adr/0023-real-model-validation-qwen2-5-0-5b.md).
 
+Task 43 measured what the NVFP4 weights cost in output quality
+(`tools/quality_eval/`): replacing Qwen2.5-0.5B's 168 exported matrices with
+their decoded NVFP4 values raised WikiText-2 perplexity from 13.07 to 14.37
+(+9.9%), with a mean KL divergence of 0.101 nats per token from the original
+and 83.5% top-1 agreement. This is one model, one text and weight-only
+simulated quantization in float32, with no comparison to other methods; see
+[ADR 0024](docs/adr/0024-nvfp4-output-quality-qwen2-5-0-5b.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
