@@ -1,0 +1,52 @@
+{
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "license": "apache-2.0",
+    "weights_sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
+  },
+  "dataset": {
+    "id": "Salesforce/wikitext",
+    "file": "wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "license": [
+      "cc-by-sa-3.0",
+      "gfdl"
+    ],
+    "sha256": "5f1bea067869d04849c0f975a2b29c4ff47d867f484f5010ea5e861eab246d91"
+  },
+  "text": {
+    "characters": 1294336,
+    "tokens": 299078,
+    "window": 2048,
+    "windows": 146,
+    "tokens_scored": 298862
+  },
+  "variants": {
+    "qwen2.5-0.5b-r12": {
+      "container": "/built/qwen2.5-0.5b-r12/te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08151227754673787,
+        "relative_frobenius_error_median": 0.08140479028224945,
+        "relative_frobenius_error_max": 0.08520351350307465
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 14.125351872833896,
+        "mean_kl_original_to_quantized": 0.08027371517736659,
+        "top1_agreement": 0.8534139502512865,
+        "relative_perplexity_increase": 0.08075554238510016
+      }
+    }
+  },
+  "environment": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.6",
+    "gpu": "NVIDIA L4",
+    "dtype": "float32"
+  },
+  "seconds": 190.1
+}
