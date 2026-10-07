@@ -1,0 +1,277 @@
+{
+  "runs": [
+    {
+      "container": "te.safetensors",
+      "exit_code": 1,
+      "stdout": "  fail k_sweep.M64.K016 [64, 16]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K032 [64, 32]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=3.0517578125e-05\n  fail k_sweep.M64.K048 [64, 48]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K064 [64, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  fail k_sweep.M64.K080 [64, 80]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K096 [64, 96]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=7.62939453125e-05\n  fail k_sweep.M64.K112 [64, 112]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K128 [64, 128]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=0.0001068115234375\n  fail k_sweep.M64.K144 [64, 144]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K160 [64, 160]: dequantize_max_abs_error=4.76837158203125e-07 gemm_max_abs_error=0.00018310546875\n  fail k_sweep.M64.K176 [64, 176]: RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\n  pass k_sweep.M64.K192 [64, 192]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=0.000152587890625\n  pass m_sweep.M016.K64 [16, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=4.57763671875e-05\n  pass m_sweep.M032.K64 [32, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=4.57763671875e-05\n  pass m_sweep.M048.K64 [48, 64]: dequantize_max_abs_error=4.76837158203125e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M064.K64 [64, 64]: dequantize_max_abs_error=4.76837158203125e-07 gemm_max_abs_error=4.57763671875e-05\n  pass m_sweep.M080.K64 [80, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M096.K64 [96, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=7.62939453125e-05\n  pass m_sweep.M112.K64 [112, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M128.K64 [128, 64]: dequantize_max_abs_error=4.76837158203125e-07 gemm_max_abs_error=7.62939453125e-05\n  pass m_sweep.M144.K64 [144, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M160.K64 [160, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=4.57763671875e-05\n  pass m_sweep.M176.K64 [176, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M192.K64 [192, 64]: dequantize_max_abs_error=9.5367431640625e-07 gemm_max_abs_error=6.103515625e-05\n  pass m_sweep.M208.K64 [208, 64]: dequantize_max_abs_error=4.76837158203125e-07 gemm_max_abs_error=7.62939453125e-05\nRESULT_JSON: {\"container\": \"/root/fixtures/te.safetensors\", \"environment\": {\"python\": \"3.12.1\", \"pytorch\": \"2.9.0+cu128\", \"cuda_runtime\": \"12.8\", \"cudnn\": 91002, \"driver\": \"580.95.05\", \"transformer_engine\": \"2.19.0\", \"gpu\": \"NVIDIA B200\", \"compute_capability\": \"10.0\"}, \"matrices\": [{\"name\": \"k_sweep.M64.K016\", \"shape\": [64, 16], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K032\", \"shape\": [64, 32], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 3.0517578125e-05}, {\"name\": \"k_sweep.M64.K048\", \"shape\": [64, 48], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K064\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"k_sweep.M64.K080\", \"shape\": [64, 80], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K096\", \"shape\": [64, 96], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 7.62939453125e-05}, {\"name\": \"k_sweep.M64.K112\", \"shape\": [64, 112], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K128\", \"shape\": [64, 128], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 0.0001068115234375}, {\"name\": \"k_sweep.M64.K144\", \"shape\": [64, 144], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K160\", \"shape\": [64, 160], \"status\": \"pass\", \"dequantize_max_abs_error\": 4.76837158203125e-07, \"gemm_max_abs_error\": 0.00018310546875}, {\"name\": \"k_sweep.M64.K176\", \"shape\": [64, 176], \"status\": \"fail\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"detail\": \"RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm\"}, {\"name\": \"k_sweep.M64.K192\", \"shape\": [64, 192], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 0.000152587890625}, {\"name\": \"m_sweep.M016.K64\", \"shape\": [16, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 4.57763671875e-05}, {\"name\": \"m_sweep.M032.K64\", \"shape\": [32, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 4.57763671875e-05}, {\"name\": \"m_sweep.M048.K64\", \"shape\": [48, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 4.76837158203125e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M064.K64\", \"shape\": [64, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 4.76837158203125e-07, \"gemm_max_abs_error\": 4.57763671875e-05}, {\"name\": \"m_sweep.M080.K64\", \"shape\": [80, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M096.K64\", \"shape\": [96, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 7.62939453125e-05}, {\"name\": \"m_sweep.M112.K64\", \"shape\": [112, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M128.K64\", \"shape\": [128, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 4.76837158203125e-07, \"gemm_max_abs_error\": 7.62939453125e-05}, {\"name\": \"m_sweep.M144.K64\", \"shape\": [144, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M160.K64\", \"shape\": [160, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 4.57763671875e-05}, {\"name\": \"m_sweep.M176.K64\", \"shape\": [176, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M192.K64\", \"shape\": [192, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 9.5367431640625e-07, \"gemm_max_abs_error\": 6.103515625e-05}, {\"name\": \"m_sweep.M208.K64\", \"shape\": [208, 64], \"status\": \"pass\", \"dequantize_max_abs_error\": 4.76837158203125e-07, \"gemm_max_abs_error\": 7.62939453125e-05}], \"passed\": false}\n",
+      "stderr": "validation failed: at least one matrix did not pass\n",
+      "outcome": {
+        "container": "/root/fixtures/te.safetensors",
+        "environment": {
+          "python": "3.12.1",
+          "pytorch": "2.9.0+cu128",
+          "cuda_runtime": "12.8",
+          "cudnn": 91002,
+          "driver": "580.95.05",
+          "transformer_engine": "2.19.0",
+          "gpu": "NVIDIA B200",
+          "compute_capability": "10.0"
+        },
+        "matrices": [
+          {
+            "name": "k_sweep.M64.K016",
+            "shape": [
+              64,
+              16
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K032",
+            "shape": [
+              64,
+              32
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 3.0517578125e-05
+          },
+          {
+            "name": "k_sweep.M64.K048",
+            "shape": [
+              64,
+              48
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K064",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "k_sweep.M64.K080",
+            "shape": [
+              64,
+              80
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K096",
+            "shape": [
+              64,
+              96
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 7.62939453125e-05
+          },
+          {
+            "name": "k_sweep.M64.K112",
+            "shape": [
+              64,
+              112
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K128",
+            "shape": [
+              64,
+              128
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 0.0001068115234375
+          },
+          {
+            "name": "k_sweep.M64.K144",
+            "shape": [
+              64,
+              144
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K160",
+            "shape": [
+              64,
+              160
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 4.76837158203125e-07,
+            "gemm_max_abs_error": 0.00018310546875
+          },
+          {
+            "name": "k_sweep.M64.K176",
+            "shape": [
+              64,
+              176
+            ],
+            "status": "fail",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "detail": "RuntimeError: /TransformerEngine/transformer_engine/common/gemm/cublaslt_gemm.cu:769 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm"
+          },
+          {
+            "name": "k_sweep.M64.K192",
+            "shape": [
+              64,
+              192
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 0.000152587890625
+          },
+          {
+            "name": "m_sweep.M016.K64",
+            "shape": [
+              16,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 4.57763671875e-05
+          },
+          {
+            "name": "m_sweep.M032.K64",
+            "shape": [
+              32,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 4.57763671875e-05
+          },
+          {
+            "name": "m_sweep.M048.K64",
+            "shape": [
+              48,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 4.76837158203125e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M064.K64",
+            "shape": [
+              64,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 4.76837158203125e-07,
+            "gemm_max_abs_error": 4.57763671875e-05
+          },
+          {
+            "name": "m_sweep.M080.K64",
+            "shape": [
+              80,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M096.K64",
+            "shape": [
+              96,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 7.62939453125e-05
+          },
+          {
+            "name": "m_sweep.M112.K64",
+            "shape": [
+              112,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M128.K64",
+            "shape": [
+              128,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 4.76837158203125e-07,
+            "gemm_max_abs_error": 7.62939453125e-05
+          },
+          {
+            "name": "m_sweep.M144.K64",
+            "shape": [
+              144,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M160.K64",
+            "shape": [
+              160,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 4.57763671875e-05
+          },
+          {
+            "name": "m_sweep.M176.K64",
+            "shape": [
+              176,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M192.K64",
+            "shape": [
+              192,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 9.5367431640625e-07,
+            "gemm_max_abs_error": 6.103515625e-05
+          },
+          {
+            "name": "m_sweep.M208.K64",
+            "shape": [
+              208,
+              64
+            ],
+            "status": "pass",
+            "dequantize_max_abs_error": 4.76837158203125e-07,
+            "gemm_max_abs_error": 7.62939453125e-05
+          }
+        ],
+        "passed": false
+      }
+    }
+  ],
+  "nvidia_smi": "Wed Oct  7 07:01:13 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA B200                    On  |   00000003:00:01.0 Off |                    0 |\n| N/A   30C    P0            248W / 1000W |     128MiB / 183359MiB |      0%      Default |\n|                                         |                        |             Disabled |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|  No running processes found                                                             |\n+-----------------------------------------------------------------------------------------+\n"
+}

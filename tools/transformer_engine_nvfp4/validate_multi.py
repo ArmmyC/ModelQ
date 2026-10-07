@@ -15,10 +15,14 @@ explicit Blackwell runtime run (Task 41), which this tool does not implement.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import pathlib
+import platform
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 import numpy as np
 from safetensors import safe_open
@@ -328,22 +332,227 @@ def validate_reference_multi(
     return worst
 
 
+# ----------------------------------------------------------------- runtime proof
+
+SECOND_OPERAND_ROWS = 64
+DEQUANTIZE_TOLERANCE = {"rtol": 1e-5, "atol": 1e-5}
+GEMM_TOLERANCE = {"rtol": 0.125, "atol": 0.0675}
+RESULT_MARKER = "RESULT_JSON: "
+
+
+class Backend(Protocol):
+    """What the proof needs from a runtime; the real one wraps Transformer Engine."""
+
+    def environment(self) -> dict[str, Any]:
+        """Preflights the environment and returns the versions to record."""
+
+    def load_weight(self, entry: MatrixEntry, data: np.ndarray, scale_inv: np.ndarray, amax: float) -> Any:
+        """Builds the runtime tensor from the exported rowwise fields."""
+
+    def dequantize(self, weight: Any) -> np.ndarray:
+        """Returns the runtime's own dequantization as an F32 array."""
+
+    def gemm_error(self, weight: Any, reference: np.ndarray) -> float:
+        """Runs one TN GEMM and returns its maximum absolute error.
+
+        Raises `ValidationError` if the output has the wrong shape, is not
+        finite, or is outside the GEMM tolerance.
+        """
+
+
+def second_operand_values(columns: int) -> np.ndarray:
+    """The deterministic `[64, columns]` second operand, identical to Task 28's recipe."""
+    indices = np.arange(SECOND_OPERAND_ROWS * columns, dtype=np.int64)
+    values = (((indices * 37) % 251) - 125).astype(np.float32) / np.float32(32.0)
+    return values.reshape(SECOND_OPERAND_ROWS, columns)
+
+
+def evaluate_matrices(
+    container: ValidatedContainer, reference_path: pathlib.Path, backend: Backend
+) -> list[dict[str, Any]]:
+    """Checks every matrix and keeps going after a failure.
+
+    A paid hardware run should reveal every incompatibility at once, so a
+    failing matrix is recorded and the loop continues.
+    """
+    results = []
+    with safe_open(reference_path, framework="numpy") as reference_file:
+        for name, entry in sorted(container.matrices.items()):
+            rows, columns = entry.logical_shape
+            record: dict[str, Any] = {"name": name, "shape": [rows, columns], "status": "pass"}
+            try:
+                reference = reference_file.get_tensor(name + REFERENCE_SUFFIX)
+                data, scale_inv, amax = load_matrix(entry)
+                weight = backend.load_weight(entry, data, scale_inv, amax)
+                runtime_values = np.asarray(backend.dequantize(weight), dtype=np.float32)
+                _require(
+                    runtime_values.shape == reference.shape
+                    and bool(np.allclose(runtime_values, reference, **DEQUANTIZE_TOLERANCE)),
+                    "the runtime's dequantization does not match the CPU reference "
+                    f"(max difference {float(np.max(np.abs(runtime_values - reference))) if runtime_values.shape == reference.shape else 'shape mismatch'})",
+                )
+                record["dequantize_max_abs_error"] = float(np.max(np.abs(runtime_values - reference)))
+                record["gemm_max_abs_error"] = backend.gemm_error(weight, reference)
+            except Exception as error:  # noqa: BLE001 - every failure must be recorded
+                record["status"] = "fail"
+                record["detail"] = f"{type(error).__name__}: {error}"
+            results.append(record)
+    return results
+
+
+class TransformerEngineBackend:
+    """Transformer Engine 2.19.0 on a Blackwell GPU, following Task 28's recipe."""
+
+    def __init__(self) -> None:
+        self._torch = None
+        self._te: dict[str, Any] = {}
+        self._device = None
+        self._quantizer = None
+
+    def environment(self) -> dict[str, Any]:
+        system, machine = platform.system(), platform.machine()
+        validate._validate_runtime_platform(system, machine)
+        try:
+            te_version = importlib.metadata.version("transformer-engine")
+        except importlib.metadata.PackageNotFoundError as error:
+            raise ValidationError("runtime proof requires the Transformer Engine 2.19.0 package") from error
+        try:
+            import torch
+        except ImportError as error:
+            raise ValidationError(f"runtime proof requires CUDA-enabled PyTorch: {error}") from error
+        cuda_available = torch.cuda.is_available()
+        capability = torch.cuda.get_device_capability() if cuda_available else None
+        validate.validate_runtime_preflight(
+            system, machine, te_version, cuda_available, torch.version.cuda,
+            torch.backends.cudnn.version(), capability,
+        )
+        try:
+            driver = subprocess.run(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip().splitlines()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise ValidationError(f"cannot query NVIDIA driver with nvidia-smi: {error}") from error
+        _require(bool(driver) and bool(driver[0].strip()), "nvidia-smi returned no NVIDIA driver version")
+
+        from transformer_engine.pytorch import NVFP4Quantizer, NVFP4Tensor
+        from transformer_engine.pytorch.constants import DType
+        from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+
+        self._torch = torch
+        self._te = {"NVFP4Tensor": NVFP4Tensor, "DType": DType, "general_gemm": general_gemm}
+        self._device = torch.device("cuda", torch.cuda.current_device())
+        self._quantizer = NVFP4Quantizer(
+            fp4_dtype=DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=False,
+            with_2d_quantization=False,
+            with_rht=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+            nvfp4_use_4over6=False,
+        )
+        return {
+            "python": platform.python_version(),
+            "pytorch": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "driver": driver[0].strip(),
+            "transformer_engine": te_version,
+            "gpu": torch.cuda.get_device_name(),
+            "compute_capability": f"{capability[0]}.{capability[1]}",
+        }
+
+    def load_weight(self, entry: MatrixEntry, data: np.ndarray, scale_inv: np.ndarray, amax: float) -> Any:
+        torch, device, te = self._torch, self._device, self._te
+        return te["NVFP4Tensor"](
+            shape=tuple(entry.logical_shape),
+            dtype=torch.float32,
+            rowwise_data=torch.as_tensor(data, device=device),
+            rowwise_scale_inv=torch.as_tensor(scale_inv, device=device),
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            amax_rowwise=torch.as_tensor(np.array([amax], dtype=np.float32), device=device),
+            amax_columnwise=None,
+            fp4_dtype=te["DType"].kFloat4E2M1,
+            quantizer=self._quantizer,
+            with_gemm_swizzled_scales=False,
+            row_scaled_nvfp4=False,
+            nvfp4_use_4over6=False,
+            device=device,
+        )
+
+    def dequantize(self, weight: Any) -> np.ndarray:
+        with self._torch.no_grad():
+            return weight.dequantize(dtype=self._torch.float32).cpu().numpy()
+
+    def gemm_error(self, weight: Any, reference: np.ndarray) -> float:
+        torch, device = self._torch, self._device
+        rows, columns = reference.shape
+        with torch.no_grad():
+            reference_weight = torch.as_tensor(reference, dtype=torch.float32, device=device)
+            rhs = torch.as_tensor(second_operand_values(columns), device=device)
+            rhs_quantized = self._quantizer.quantize(rhs)
+            rhs_dequantized = rhs_quantized.dequantize(dtype=torch.float32)
+            out, _, _, _ = self._te["general_gemm"](
+                weight, rhs_quantized, out_dtype=torch.float32, layout="TN"
+            )
+            expected = rhs_dequantized @ reference_weight.T
+            _require(
+                tuple(out.shape) == (SECOND_OPERAND_ROWS, rows),
+                f"TN GEMM output shape must be {(SECOND_OPERAND_ROWS, rows)}, got {tuple(out.shape)}",
+            )
+            _require(bool(torch.isfinite(out).all().item()), "TN GEMM output must be finite")
+            torch.testing.assert_close(out, expected, **GEMM_TOLERANCE)
+            return float((out - expected).abs().max().item())
+
+
+def run_runtime_proof(
+    container_path: pathlib.Path, reference_path: pathlib.Path, backend: Backend | None = None
+) -> dict[str, Any]:
+    """Validates on the CPU, then runs every matrix through the runtime."""
+    container = validate_multi_container(container_path)
+    validate_reference_multi(container, reference_path)
+    backend = backend if backend is not None else TransformerEngineBackend()
+    environment = backend.environment()
+    results = evaluate_matrices(container, reference_path, backend)
+    return {
+        "container": str(container_path),
+        "environment": environment,
+        "matrices": results,
+        "passed": all(record["status"] == "pass" for record in results),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="mode", required=True)
     cpu = sub.add_parser("cpu", help="CPU container check (no TE, no CUDA)")
     cpu.add_argument("--container", type=pathlib.Path, required=True, help="file, or directory with an index")
     cpu.add_argument("--reference", type=pathlib.Path, help="F32 reference file to compare against")
-    sub.add_parser("runtime", help="Blackwell runtime proof (not implemented until Task 41)")
+    runtime = sub.add_parser("runtime", help="explicit Blackwell runtime proof (Linux, pinned TE 2.19.0)")
+    runtime.add_argument("--container", type=pathlib.Path, required=True, help="file, or directory with an index")
+    runtime.add_argument("--reference", type=pathlib.Path, required=True, help="F32 reference file")
     args = parser.parse_args(argv)
 
     if args.mode == "runtime":
-        print(
-            "validation failed: the multi-matrix runtime proof is not implemented yet "
-            "(Task 41); no hardware compatibility is claimed",
-            file=sys.stderr,
-        )
-        return 2
+        try:
+            outcome = run_runtime_proof(args.container, args.reference)
+        except ValidationError as error:
+            print(f"validation failed: {error}", file=sys.stderr)
+            return 1
+        for record in outcome["matrices"]:
+            detail = record.get("detail") or (
+                f"dequantize_max_abs_error={record['dequantize_max_abs_error']} "
+                f"gemm_max_abs_error={record['gemm_max_abs_error']}"
+            )
+            print(f"  {record['status']:4} {record['name']} {record['shape']}: {detail}")
+        print(RESULT_MARKER + json.dumps(outcome))
+        if not outcome["passed"]:
+            print("validation failed: at least one matrix did not pass", file=sys.stderr)
+            return 1
+        print("runtime proof passed for every matrix")
+        return 0
     try:
         container = validate_multi_container(args.container)
         print(

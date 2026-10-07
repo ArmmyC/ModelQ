@@ -79,7 +79,7 @@ def write_container(path, *, matrices=(("w", 48, 96),), preserved=None, manifest
     )
 
 
-class MultiContainerTests(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.dir = pathlib.Path(self._dir.name)
@@ -91,6 +91,14 @@ class MultiContainerTests(unittest.TestCase):
     def assertRejected(self, text):
         with self.assertRaisesRegex(vm.ValidationError, text):
             vm.validate_multi_container(self.path)
+
+    def reference_file(self, name, array, *, schema=vm.REFERENCE_SCHEMA):
+        path = self.dir / "reference.safetensors"
+        save_file({name + vm.REFERENCE_SUFFIX: array}, str(path), metadata={"modelq.reference_schema": schema})
+        return path
+
+
+class MultiContainerTests(Base):
 
     def test_valid_container_with_preserved_tensors_passes(self):
         write_container(
@@ -222,11 +230,6 @@ class MultiContainerTests(unittest.TestCase):
         with self.assertRaisesRegex(vm.ValidationError, "more than one shard"):
             vm.validate_multi_container(self.dir)
 
-    def reference_file(self, name, array, *, schema=vm.REFERENCE_SCHEMA):
-        path = self.dir / "reference.safetensors"
-        save_file({name + vm.REFERENCE_SUFFIX: array}, str(path), metadata={"modelq.reference_schema": schema})
-        return path
-
     def test_reference_comparison_accepts_the_decode_and_rejects_differences(self):
         write_container(self.path, matrices=(("w", 48, 96),))
         container = vm.validate_multi_container(self.path)
@@ -249,7 +252,111 @@ class MultiContainerTests(unittest.TestCase):
         write_container(self.path)
         self.assertEqual(vm.main(["cpu", "--container", str(self.path)]), 0)
         self.assertEqual(vm.main(["cpu", "--container", str(self.dir / "missing")]), 1)
-        self.assertEqual(vm.main(["runtime"]), 2)
+
+    def test_runtime_mode_fails_cleanly_without_the_pinned_environment(self):
+        # Neither Windows/macOS hosts nor Linux hosts without TE/CUDA can pass.
+        write_container(self.path)
+        reference = self.write_reference("w", 48, 96)
+        self.assertEqual(
+            vm.main(["runtime", "--container", str(self.path), "--reference", str(reference)]), 1
+        )
+
+    def write_reference(self, name, rows, columns):
+        container = vm.validate_multi_container(self.path)
+        data, scales, amax = vm.load_matrix(container.matrices[name])
+        return self.reference_file(name, vm.decode_matrix(rows, columns, data, scales, amax))
+
+
+class FakeBackend:
+    """Stands in for Transformer Engine so the proof's control flow is testable."""
+
+    def __init__(self, *, dequantize_offset=None, gemm_failures=(), environment_error=None):
+        self.dequantize_offset = dequantize_offset or {}
+        self.gemm_failures = set(gemm_failures)
+        self.environment_error = environment_error
+        self.loaded = []
+
+    def environment(self):
+        if self.environment_error:
+            raise vm.ValidationError(self.environment_error)
+        return {"transformer_engine": "2.19.0", "gpu": "fake"}
+
+    def load_weight(self, entry, data, scale_inv, amax):
+        self.loaded.append(entry.name)
+        return (entry, vm.decode_matrix(*entry.logical_shape, data, scale_inv, amax))
+
+    def dequantize(self, weight):
+        entry, values = weight
+        return values + self.dequantize_offset.get(entry.name, 0.0)
+
+    def gemm_error(self, weight, reference):
+        entry, _ = weight
+        if entry.name in self.gemm_failures:
+            raise vm.ValidationError("TN GEMM output is outside the tolerance")
+        return 0.001
+
+
+class RuntimeProofTests(Base):
+    def prepare(self, matrices):
+        write_container(self.path, matrices=matrices)
+        container = vm.validate_multi_container(self.path)
+        arrays = {}
+        for name, entry in container.matrices.items():
+            data, scales, amax = vm.load_matrix(entry)
+            arrays[name + vm.REFERENCE_SUFFIX] = vm.decode_matrix(
+                *entry.logical_shape, data, scales, amax
+            )
+        reference = self.dir / "reference.safetensors"
+        save_file(arrays, str(reference), metadata={"modelq.reference_schema": vm.REFERENCE_SCHEMA})
+        return reference
+
+    def test_every_matrix_is_loaded_and_reported(self):
+        reference = self.prepare((("a", 16, 16), ("b", 48, 96), ("c", 144, 80)))
+        backend = FakeBackend()
+        outcome = vm.run_runtime_proof(self.path, reference, backend)
+        self.assertTrue(outcome["passed"])
+        self.assertEqual(backend.loaded, ["a", "b", "c"])
+        self.assertEqual([m["status"] for m in outcome["matrices"]], ["pass"] * 3)
+        self.assertEqual(outcome["environment"]["gpu"], "fake")
+        self.assertEqual(outcome["matrices"][1]["shape"], [48, 96])
+
+    def test_a_failing_matrix_does_not_hide_the_others(self):
+        reference = self.prepare((("a", 16, 16), ("b", 48, 96), ("c", 144, 80)))
+        backend = FakeBackend(gemm_failures={"b"}, dequantize_offset={"c": 0.5})
+        outcome = vm.run_runtime_proof(self.path, reference, backend)
+        statuses = {m["name"]: m for m in outcome["matrices"]}
+        self.assertFalse(outcome["passed"])
+        self.assertEqual(statuses["a"]["status"], "pass")
+        self.assertEqual(statuses["b"]["status"], "fail")
+        self.assertIn("tolerance", statuses["b"]["detail"])
+        self.assertEqual(statuses["c"]["status"], "fail")
+        self.assertIn("dequantization does not match", statuses["c"]["detail"])
+        # All three were attempted in one run.
+        self.assertEqual(backend.loaded, ["a", "b", "c"])
+
+    def test_an_unusable_environment_aborts_before_any_matrix(self):
+        reference = self.prepare((("a", 16, 16),))
+        backend = FakeBackend(environment_error="runtime proof requires Linux")
+        with self.assertRaisesRegex(vm.ValidationError, "requires Linux"):
+            vm.run_runtime_proof(self.path, reference, backend)
+        self.assertEqual(backend.loaded, [])
+
+    def test_a_bad_container_or_reference_is_rejected_before_the_runtime(self):
+        reference = self.prepare((("a", 16, 16),))
+        wrong = self.reference_file("other", np.zeros((16, 16), dtype=np.float32))
+        backend = FakeBackend()
+        with self.assertRaises(vm.ValidationError):
+            vm.run_runtime_proof(self.path, wrong, backend)
+        self.assertEqual(backend.loaded, [])
+        self.assertTrue(reference.exists())
+
+    def test_the_second_operand_recipe_matches_task_28(self):
+        values = vm.second_operand_values(64)
+        self.assertEqual(values.shape, (64, 64))
+        indices = np.arange(4096, dtype=np.int32)
+        expected = (((indices * 37) % 251) - 125).astype(np.float32) / np.float32(32.0)
+        np.testing.assert_array_equal(values.reshape(-1), expected)
+        self.assertEqual(vm.second_operand_values(80).shape, (64, 80))
 
 
 if __name__ == "__main__":

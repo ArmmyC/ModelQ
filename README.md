@@ -151,15 +151,18 @@ scheduler change, [ADR 0019](docs/adr/0019-shared-parallel-scheduler.md).
 Task 40 adds `modelq quantize --format nvfp4-te`, which writes many rank-two
 matrices into a Transformer Engine rowwise NVFP4 container (schema v2) with a
 manifest per file or shard, using the same bounded parallel quantizer, sharded
-input and output, and policy flags as `--format nvfp4`. Only matrices whose
-both dimensions are divisible by 16 are exported; everything else is preserved
-with a printed reason. This is **CPU-validated only**: the container's fields
-are byte-identical to the single-matrix artifact that passed on a B200, and an
-independent Python validator decodes it to the reference, but Transformer
-Engine compatibility of the multi-matrix schema has not been run on hardware
-(planned as Task 41). See
-[ADR 0021](docs/adr/0021-transformer-engine-multi-matrix-container.md) and the
-[tool README](tools/transformer_engine_nvfp4/README.md).
+input and output, and policy flags as `--format nvfp4`. Only rank-two matrices
+with a leading dimension divisible by 16 and a final dimension divisible by 32
+are exported; everything else is preserved
+with a printed reason. Task 41 ran it on hardware: on an NVIDIA B200 with
+Transformer Engine 2.19.0, every exported matrix loads into TE, dequantizes to
+the reference, and passes one TN GEMM, in both single-file and sharded form.
+The run also found that the GEMM is rejected unless the final dimension is
+divisible by 32, so the exporter now preserves other matrices (only the tested
+operation and shapes are validated; no model loading or inference). See
+[ADR 0021](docs/adr/0021-transformer-engine-multi-matrix-container.md),
+[ADR 0022](docs/adr/0022-transformer-engine-multi-matrix-hardware-validation.md)
+and the [tool README](tools/transformer_engine_nvfp4/README.md).
 
 ## Requirements
 
