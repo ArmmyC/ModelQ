@@ -183,6 +183,17 @@ and 83.5% top-1 agreement. This is one model, one text and weight-only
 simulated quantization in float32, with no comparison to other methods; see
 [ADR 0024](docs/adr/0024-nvfp4-output-quality-qwen2-5-0-5b.md).
 
+Task 44 adds an opt-in block-scale search, `--scale-search <RADIUS>` for
+`--format nvfp4` and `nvfp4-te`: each 16-value block's E4M3 scale is chosen by
+minimum reconstruction error among the codes within RADIUS of the default
+rule, instead of from the block's largest value alone. Only the stored scale
+bytes change, so decoders and the Transformer Engine runtime are unaffected,
+and the default output is byte-identical to before. On Qwen2.5-0.5B, radius 6
+reduced the WikiText-2 perplexity increase from +9.93% to +8.07%, passed the
+B200 proof (168/168 matrices), and cost about 1.2x wall time in parallel (8x on
+one thread). One model, one text; see
+[ADR 0025](docs/adr/0025-nvfp4-block-scale-search.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer

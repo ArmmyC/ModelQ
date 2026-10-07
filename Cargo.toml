@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "int8_streaming"
 harness = false
+
+[[bench]]
+name = "nvfp4_scale_search"
+harness = false

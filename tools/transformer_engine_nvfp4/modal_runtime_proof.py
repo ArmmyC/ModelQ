@@ -198,6 +198,63 @@ def fetch_and_convert(model: str, name: str) -> dict:
     }
 
 
+@app.function(image=rust_image, cpu=4, memory=16384, timeout=7200, volumes={BUILT_ROOT: volume})
+def convert_scale_search(model: str, base: str, radii: str) -> dict:
+    """Converts one model once per block-scale search radius, on Linux in Modal.
+
+    The model is downloaded at its pinned commit and hash-checked exactly as in
+    `fetch_and_convert`.  For each radius in the comma-separated `radii` it
+    writes the volume directory `<base>-r<radius>` holding `te.safetensors`
+    and the matching `reference.safetensors` (derived from the source weights
+    with the same scale rule), and returns the CLI's conversion report.
+    """
+    started = time.time()
+    with urllib.request.urlopen(f"{HF}/api/models/{model}?blobs=true") as response:
+        api = json.load(response)
+    revision = api["sha"]
+    license_id = (api.get("cardData") or {}).get("license")
+    if license_id not in ALLOWED_LICENSES or api.get("gated"):
+        raise RuntimeError(f"{model} must be an ungated Apache-2.0 or MIT model")
+    entry = next(f for f in api["siblings"] if f["rfilename"] == "model.safetensors")
+    source = pathlib.Path("/tmp/model.safetensors")
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(f"{HF}/{model}/resolve/{revision}/model.safetensors") as response, source.open("wb") as handle:
+        while chunk := response.read(1 << 20):
+            digest.update(chunk)
+            handle.write(chunk)
+    if digest.hexdigest() != entry["lfs"]["sha256"]:
+        raise RuntimeError(f"sha256 mismatch for {model}@{revision}")
+
+    def run(*command: str) -> str:
+        completed = subprocess.run(
+            command, cwd="/repo", capture_output=True, text=True, check=False,
+            env={**os.environ, "CARGO_TERM_COLOR": "never"},
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(" ".join(command) + " failed:" + chr(10) + completed.stdout[-2000:] + chr(10) + completed.stderr[-4000:])
+        return completed.stdout
+
+    reports = {}
+    for radius in [int(part) for part in radii.split(",")]:
+        out = pathlib.Path(BUILT_ROOT) / f"{base}-r{radius}"
+        if out.exists():
+            raise RuntimeError(f"{out} already exists")
+        scratch = pathlib.Path(f"/tmp/search-{radius}")
+        scratch.mkdir()
+        reference_log = run(
+            "cargo", "run", "-q", "--release", "-p", "modelq-io", "--example", "te_reference_from_source",
+            "--", str(source), str(scratch / "reference.safetensors"), "--scale-search", str(radius),
+        )
+        report = run(
+            "cargo", "run", "-q", "--release", "--bin", "modelq", "--", "quantize", str(source),
+            "--format", "nvfp4-te", "--scale-search", str(radius), "--output", str(scratch / "te.safetensors"),
+        )
+        shutil.copytree(scratch, out)
+        volume.commit()
+        reports[str(radius)] = {"directory": str(out), "reference_log": reference_log.strip(), "convert_report": report}
+    return {"model": model, "revision": revision, "radii": reports, "seconds": round(time.time() - started, 1)}
+
+
 @app.function(image=rust_image, cpu=8, memory=16384, timeout=3600)
 def verify_repo() -> dict:
     """Runs the formatting check and the whole Rust test suite on Linux (Rust 1.85, CPU only)."""
@@ -220,6 +277,18 @@ def verify_repo() -> dict:
         if label == "test":
             steps[label].update({"passed": passed, "failed": failed, "ignored": ignored})
     return steps
+
+
+@app.function(image=rust_image, cpu=8, memory=16384, timeout=3600)
+def bench_scale_search() -> str:
+    """Runs the block-scale search cost benchmark on Linux in Modal (CPU only)."""
+    completed = subprocess.run(
+        ["cargo", "bench", "--bench", "nvfp4_scale_search"], cwd="/repo",
+        capture_output=True, text=True, check=False, env={**os.environ, "CARGO_TERM_COLOR": "never"},
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stdout[-2000:] + chr(10) + completed.stderr[-3000:])
+    return completed.stdout
 
 
 @app.function(
@@ -365,3 +434,45 @@ def validate_model(model: str = "Qwen/Qwen2.5-0.5B", name: str = "qwen2.5-0.5b")
     print(f"result written to {results / (name + '.json')}")
     if failed:
         raise SystemExit(1)
+
+
+@app.local_entrypoint()
+def search_experiment(model: str = "Qwen/Qwen2.5-0.5B", base: str = "qwen2.5-0.5b", radii: str = "1,2,4,6,8,12") -> None:
+    """Converts `model` once per block-scale search radius into volume directories `<base>-r<radius>`."""
+    result = convert_scale_search.remote(model, base, radii)
+    print(f"{result['model']}@{result['revision']} converted in {result['seconds']} s")
+    for radius, report in result["radii"].items():
+        lines = [l for l in report["convert_report"].splitlines()
+                 if l.strip().startswith(("Block scales", "Output bytes", "Max MSE", "Max MAE", "Lowest SQNR", "Tensors:"))]
+        print(f"-- radius {radius}: {report['directory']}")
+        print(chr(10).join(lines))
+
+
+@app.local_entrypoint()
+def bench_search() -> None:
+    """Prints the cost of the block-scale search relative to the default rule."""
+    print(bench_scale_search.remote())
+
+
+@app.local_entrypoint()
+def prove_existing(name: str) -> None:
+    """Runs the B200 runtime proof on containers already in the volume directory `name`."""
+    result = prove.remote(f"{BUILT_ROOT}/{name}")
+    results = REPO / "modal_results"
+    results.mkdir(exist_ok=True)
+    (results / f"{name}.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    failed = False
+    for run in result["runs"]:
+        outcome = run["outcome"]
+        print(f"== {run['container']}: exit code {run['exit_code']}")
+        if outcome:
+            matrices = outcome["matrices"]
+            print(f"   {sum(1 for m in matrices if m['status'] == 'pass')}/{len(matrices)} matrices passed; {outcome['environment']}")
+            for record in matrices:
+                if record["status"] != "pass":
+                    print(f"   FAIL {record['name']} {record['shape']}: {record.get('detail')}")
+        failed = failed or run["exit_code"] != 0
+    print(f"result written to {results / (name + '.json')}")
+    if failed:
+        raise SystemExit(1)
+
