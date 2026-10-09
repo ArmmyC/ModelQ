@@ -1,4 +1,5 @@
 mod eval_command;
+mod hub;
 mod nvfp4_command;
 mod output;
 
@@ -123,7 +124,23 @@ fn build_cli() -> Command {
                     Arg::new("model")
                         .value_name("MODEL")
                         .value_parser(value_parser!(PathBuf))
-                        .required(true),
+                        .required(true)
+                        .help("a local checkpoint, or hf:<owner>/<name> to fetch it from the Hugging Face Hub"),
+                )
+                .arg(
+                    Arg::new("revision")
+                        .long("revision")
+                        .value_name("REVISION")
+                        .value_parser(value_parser!(String))
+                        .default_value("main")
+                        .help("with hf:, the branch, tag or commit to fetch"),
+                )
+                .arg(
+                    Arg::new("cache-dir")
+                        .long("cache-dir")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("with hf:, where downloads are cached (default: $MODELQ_CACHE, then the user cache)"),
                 )
                 .arg(
                     Arg::new("format")
@@ -299,12 +316,13 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             run_quantize(matches).map(|report| print_quantize_report(&report))
         }
         "nvfp4" | "nvfp4-te" => {
-            let (input, output) = quantize_paths(matches)?;
+            let (model, output) = quantize_paths(matches)?;
             require_cpu(matches)?;
             let target = output::OutputTarget::from_args(
                 output,
                 matches.get_one::<String>("max-shard-size"),
             )?;
+            let input = resolve_model_input(matches, model)?;
             let options = nvfp4_command::Nvfp4Options {
                 profile: if format == "nvfp4-te" {
                     nvfp4_command::Nvfp4Profile::TransformerEngine
@@ -325,6 +343,35 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             "unsupported format {other:?}; supported formats are int8, nvfp4 and nvfp4-te"
         )),
     }
+}
+
+/// Turns `hf:<owner>/<name>` into a cached local directory; any other path is
+/// returned unchanged. Called only after the output path has been validated,
+/// so a bad output never causes a download.
+fn resolve_model_input(matches: &ArgMatches, model: PathBuf) -> Result<PathBuf, String> {
+    let repo_text = model
+        .to_str()
+        .and_then(|text| text.strip_prefix(hub::PREFIX))
+        .map(str::to_owned);
+    let Some(repo_text) = repo_text else {
+        return Ok(model);
+    };
+    let repo = hub::RepoId::parse(&repo_text)?;
+    let cache_dir = match matches.get_one::<PathBuf>("cache-dir") {
+        Some(dir) => dir.clone(),
+        None => hub::default_cache_dir()?,
+    };
+    let revision = matches
+        .get_one::<String>("revision")
+        .cloned()
+        .unwrap_or_else(|| "main".to_owned());
+    hub::fetch(&hub::Request {
+        repo,
+        revision,
+        cache_dir,
+        endpoint: hub::endpoint_from_env(),
+        token: hub::token_from_env(),
+    })
 }
 
 fn quantize_paths(matches: &ArgMatches) -> Result<(PathBuf, PathBuf), String> {
@@ -353,7 +400,7 @@ fn require_cpu(matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
-    let input = matches
+    let model = matches
         .get_one::<PathBuf>("model")
         .ok_or_else(|| "quantize requires a model path".to_owned())?
         .clone();
@@ -389,6 +436,7 @@ fn run_quantize(matches: &ArgMatches) -> Result<QuantizeReport, String> {
     } else {
         Int8Execution::Parallel(config)
     };
+    let input = resolve_model_input(matches, model)?;
     println!("Inspecting source: {}", input.display());
     let source = SafetensorsInput::open(&input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();

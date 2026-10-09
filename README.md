@@ -202,6 +202,24 @@ the reference rule and reproduces the output of earlier versions byte for byte;
 reference rule as its default. See
 [ADR 0027](docs/adr/0027-scale-search-default.md).
 
+## Quantizing a Hugging Face model
+
+`hf:<owner>/<name>` fetches a model's SafeTensors weights from the Hugging Face
+Hub into a cache, checks every file against the checksum the Hub publishes,
+and quantizes them. The model's license is printed before anything is
+downloaded:
+
+```bash
+modelq quantize hf:Qwen/Qwen2.5-0.5B --format nvfp4-te --output ./te.safetensors
+```
+
+Add `--revision <branch|tag|commit>` to pin a version, and `--cache-dir <PATH>`
+to choose where files are cached (default: `$MODELQ_CACHE`, then your user
+cache). Gated or private repositories need `HF_TOKEN` set to a token that has
+access, and you must accept the model's terms on its page first. Downloads are
+resumable. A bare `owner/name` is treated as a local path, so a typo never
+starts a download. See [ADR 0029](docs/adr/0029-hugging-face-hub-input.md).
+
 ## Evaluating a quantized output
 
 `modelq eval` measures a ModelQ NVFP4 Transformer Engine container against the

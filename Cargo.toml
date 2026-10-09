@@ -22,13 +22,16 @@ clap = { version = "=4.6.6", default-features = false, features = [
     "error-context",
     "suggestions",
 ] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+sha1 = "=0.11.0"
+sha2 = "=0.11.0"
+ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "gzip"] }
 modelq-backend = { path = "crates/modelq-backend" }
 modelq-core = { path = "crates/modelq-core" }
 modelq-io = { path = "crates/modelq-io" }
 modelq-quant = { path = "crates/modelq-quant" }
 
 [dev-dependencies]
-serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "cpu_parallel"

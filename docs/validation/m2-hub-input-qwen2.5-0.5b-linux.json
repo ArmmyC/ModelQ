@@ -1,0 +1,36 @@
+{
+  "milestone": "M2 Hugging Face input (ADR 0029), real Hub, Linux in Modal",
+  "command": "modelq quantize hf:Qwen/Qwen2.5-0.5B --format nvfp4-te --revision 060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "model": "Qwen/Qwen2.5-0.5B",
+  "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "first_run": {
+    "seconds": 95.3,
+    "lines": [
+      "model   Qwen/Qwen2.5-0.5B @ 060db6499f32",
+      "license apache-2.0 (check the model page before you use the result: https://huggingface.co/Qwen/Qwen2.5-0.5B)",
+      "fetch   model.safetensors (942.3 MB)",
+      "stored  model.safetensors (verified)",
+      "ready   /tmp/hub-check/cache/hub/Qwen/Qwen2.5-0.5B/060db6499f32faf8b98477b0a26969ef7d8b9987"
+    ]
+  },
+  "second_run": {
+    "seconds": 16.4,
+    "exit_code": 0,
+    "lines": [
+      "model   Qwen/Qwen2.5-0.5B @ 060db6499f32",
+      "license apache-2.0 (check the model page before you use the result: https://huggingface.co/Qwen/Qwen2.5-0.5B)",
+      "cached  model.safetensors (verified)",
+      "ready   /tmp/hub-check/cache/hub/Qwen/Qwen2.5-0.5B/060db6499f32faf8b98477b0a26969ef7d8b9987"
+    ]
+  },
+  "output": {
+    "bytes": 473840528,
+    "sha256": "62c1caa894039f2e736a06170db27e93afd3a7dd8288684892b12a2caa15b149"
+  },
+  "reference": {
+    "file": "qwen2.5-0.5b-default-r6/te.safetensors (Task 46, local CLI conversion)",
+    "bytes": 473840528,
+    "sha256": "62c1caa894039f2e736a06170db27e93afd3a7dd8288684892b12a2caa15b149"
+  },
+  "byte_identical": true
+}
