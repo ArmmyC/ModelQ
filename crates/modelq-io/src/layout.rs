@@ -7,11 +7,27 @@
 use std::{collections::BTreeSet, fmt, ops::Range};
 
 use crate::safetensors::TensorSummary;
+use modelq_quant::lowbit::{LowBitConfig, Scheme};
 use modelq_quant::policy::{PolicyAction, TensorDecision, TensorKind};
 
 const INT8_DTYPE: &str = "I8";
 const SCALE_DTYPE: &str = "F32";
 const SCALE_BYTE_LEN: u64 = 4;
+const GROUP_PAYLOAD_DTYPE: &str = "U8";
+
+/// How a quantized tensor is stored in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantizedEncoding {
+    /// One signed byte per value and one F32 scale per tensor (ADR 0002).
+    Int8,
+    /// Packed `bits`-bit codes and one F32 scale per group of `group_size`
+    /// consecutive values (ADR 0030). `scheme` selects the code rule.
+    GroupWise {
+        bits: u8,
+        group_size: usize,
+        scheme: Scheme,
+    },
+}
 const RESERVED_METADATA_NAME: &str = "__metadata__";
 
 /// The role of one tensor in the planned output.
@@ -64,6 +80,8 @@ impl OutputLayoutPlan {
 /// safe output layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
+    /// The quantized encoding is invalid, for example an unsupported bit width.
+    InvalidEncoding { detail: String },
     /// The planner requires one decision for every source tensor.
     DecisionCountMismatch { sources: usize, decisions: usize },
     /// A source tensor name appears more than once.
@@ -101,6 +119,9 @@ pub enum LayoutError {
 impl fmt::Display for LayoutError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidEncoding { detail } => {
+                write!(formatter, "invalid quantized encoding: {detail}")
+            }
             Self::DecisionCountMismatch { sources, decisions } => write!(
                 formatter,
                 "layout needs one policy decision per source ({sources} sources, {decisions} decisions)"
@@ -167,7 +188,7 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Plans all output tensors and contiguous data offsets.
+/// Plans all output tensors and contiguous data offsets for the INT8 layout.
 ///
 /// Sources and decisions may arrive in any order. The planner sorts both by
 /// tensor name, then emits a preserved tensor or a qdata-then-scale pair. All
@@ -177,6 +198,34 @@ pub fn plan_output_layout(
     sources: &[TensorSummary],
     decisions: &[TensorDecision],
 ) -> Result<OutputLayoutPlan, LayoutError> {
+    plan_output_layout_for(sources, decisions, QuantizedEncoding::Int8)
+}
+
+/// Plans the output layout for the given quantized encoding.
+///
+/// Preserved tensors are laid out identically for every encoding; only the
+/// payload and scale tensors of quantized sources change.
+pub fn plan_output_layout_for(
+    sources: &[TensorSummary],
+    decisions: &[TensorDecision],
+    encoding: QuantizedEncoding,
+) -> Result<OutputLayoutPlan, LayoutError> {
+    if let QuantizedEncoding::GroupWise {
+        bits,
+        group_size,
+        scheme,
+    } = encoding
+    {
+        LowBitConfig {
+            bits,
+            group_size,
+            scheme,
+        }
+        .validate()
+        .map_err(|error| LayoutError::InvalidEncoding {
+            detail: error.to_string(),
+        })?;
+    }
     if sources.len() != decisions.len() {
         return Err(LayoutError::DecisionCountMismatch {
             sources: sources.len(),
@@ -267,6 +316,7 @@ pub fn plan_output_layout(
                 let scale_name = format!("{}.scale", source.name);
                 ensure_generated_name(&qdata_name, &source_names, &output_names)?;
                 ensure_generated_name(&scale_name, &source_names, &output_names)?;
+                let layout = quantized_layout(source, element_count, encoding)?;
                 append_tensor(
                     &mut output_tensors,
                     &mut output_names,
@@ -274,9 +324,9 @@ pub fn plan_output_layout(
                     PendingTensor {
                         source_name: source.name.clone(),
                         name: qdata_name,
-                        dtype: INT8_DTYPE.to_owned(),
-                        shape: source.shape.clone(),
-                        byte_len: element_count,
+                        dtype: layout.payload_dtype,
+                        shape: layout.payload_shape,
+                        byte_len: layout.payload_bytes,
                         role: OutputTensorRole::QuantizedData,
                     },
                 )?;
@@ -288,8 +338,8 @@ pub fn plan_output_layout(
                         source_name: source.name.clone(),
                         name: scale_name,
                         dtype: SCALE_DTYPE.to_owned(),
-                        shape: Vec::new(),
-                        byte_len: SCALE_BYTE_LEN,
+                        shape: layout.scale_shape,
+                        byte_len: layout.scale_bytes,
                         role: OutputTensorRole::QuantizationScale,
                     },
                 )?;
@@ -310,6 +360,54 @@ pub fn plan_output_layout(
         tensors: output_tensors,
         total_data_bytes: cursor,
     })
+}
+
+/// The payload and scale shapes and sizes of one quantized source tensor.
+struct QuantizedLayout {
+    payload_dtype: String,
+    payload_shape: Vec<usize>,
+    payload_bytes: u64,
+    scale_shape: Vec<usize>,
+    scale_bytes: u64,
+}
+
+fn quantized_layout(
+    source: &TensorSummary,
+    element_count: u64,
+    encoding: QuantizedEncoding,
+) -> Result<QuantizedLayout, LayoutError> {
+    match encoding {
+        QuantizedEncoding::Int8 => Ok(QuantizedLayout {
+            payload_dtype: INT8_DTYPE.to_owned(),
+            payload_shape: source.shape.clone(),
+            payload_bytes: element_count,
+            scale_shape: Vec::new(),
+            scale_bytes: SCALE_BYTE_LEN,
+        }),
+        QuantizedEncoding::GroupWise {
+            bits, group_size, ..
+        } => {
+            let overflow = || LayoutError::ShapeElementCountOverflow {
+                name: source.name.clone(),
+                shape: source.shape.clone(),
+            };
+            let total_bits = element_count
+                .checked_mul(u64::from(bits))
+                .ok_or_else(overflow)?;
+            let payload_bytes = total_bits.div_ceil(8);
+            let groups = element_count.div_ceil(group_size as u64);
+            let scale_bytes = groups.checked_mul(SCALE_BYTE_LEN).ok_or_else(overflow)?;
+            let payload_len = usize::try_from(payload_bytes).map_err(|_| overflow())?;
+            let groups_len = usize::try_from(groups).map_err(|_| overflow())?;
+            Ok(QuantizedLayout {
+                payload_dtype: GROUP_PAYLOAD_DTYPE.to_owned(),
+                payload_shape: vec![payload_len],
+                payload_bytes,
+                scale_shape: vec![groups_len],
+                scale_bytes,
+            })
+        }
+    }
 }
 
 fn checked_element_count(source: &TensorSummary) -> Result<u64, LayoutError> {

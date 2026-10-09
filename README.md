@@ -202,6 +202,29 @@ the reference rule and reproduces the output of earlier versions byte for byte;
 reference rule as its default. See
 [ADR 0027](docs/adr/0027-scale-search-default.md).
 
+## Low-bit formats and the format registry
+
+`modelq formats` lists every format the CLI can write, with the status ModelQ
+can honestly claim for it. A status is never higher than the evidence:
+
+```bash
+modelq formats
+```
+
+Group-wise integer formats store `--group-size` values (default 128) per
+scale: `int4` is symmetric and stable; `int3`, `int2` and `int1` are
+experimental and need `--experimental`, which is a deliberate guard:
+
+```bash
+modelq quantize ./model.safetensors --format int4 --output ./int4.safetensors
+modelq quantize ./model.safetensors --format int2 --experimental --output ./int2.safetensors
+```
+
+These files are ModelQ-native. No inference runtime reads them, and none is
+claimed. Their layout is specified in [ADR 0030](docs/adr/0030-group-wise-low-bit-formats.md).
+No quality measurement exists for them yet: `modelq eval` reads only
+Transformer Engine containers, so evaluate a low-bit output before relying on it.
+
 ## Quantizing a Hugging Face model
 
 `hf:<owner>/<name>` fetches a model's SafeTensors weights from the Hugging Face

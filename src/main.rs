@@ -1,5 +1,6 @@
 mod eval_command;
 mod hub;
+mod lowbit_command;
 mod nvfp4_command;
 mod output;
 
@@ -28,6 +29,10 @@ fn main() {
         }
         Some(("quantize", matches)) => run_quantize_command(matches),
         Some(("eval", matches)) => run_eval_command(matches),
+        Some(("formats", _)) => {
+            print_formats();
+            Ok(())
+        }
         _ => Ok(()),
     };
 
@@ -67,6 +72,53 @@ fn run_inspect(path: &std::path::Path) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Prints the format registry as a table (ADR 0028 section 2).
+fn print_formats() {
+    let rows: Vec<[String; 6]> = modelq::quant::formats::FORMATS
+        .iter()
+        .map(|spec| {
+            [
+                spec.id.to_owned(),
+                spec.bits.to_string(),
+                spec.default_group_size
+                    .map_or_else(|| "-".to_owned(), |size| size.to_string()),
+                spec.status.label(),
+                if spec.requires_experimental_flag {
+                    "--experimental".to_owned()
+                } else {
+                    "-".to_owned()
+                },
+                spec.container.to_owned(),
+            ]
+        })
+        .collect();
+    let headers = ["FORMAT", "BITS", "GROUP", "STATUS", "REQUIRES", "CONTAINER"];
+    let mut widths = headers.map(str::len);
+    for row in &rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.len());
+        }
+    }
+    let line = |cells: [&str; 6]| {
+        cells
+            .iter()
+            .zip(widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_owned()
+    };
+    println!("{}", line(headers));
+    for row in &rows {
+        println!("{}", line(row.each_ref().map(String::as_str)));
+    }
+    println!();
+    println!(
+        "Group-wise formats write ModelQ-native files; no inference runtime is claimed unless STATUS says so."
+    );
 }
 
 fn run_eval_command(matches: &ArgMatches) -> Result<(), String> {
@@ -126,6 +178,19 @@ fn build_cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .required(true)
                         .help("a local checkpoint, or hf:<owner>/<name> to fetch it from the Hugging Face Hub"),
+                )
+                .arg(
+                    Arg::new("group-size")
+                        .long("group-size")
+                        .value_name("N")
+                        .value_parser(value_parser!(u64).range(1..))
+                        .help("int4, int3, int2 and int1: values per scale group (default: 128)"),
+                )
+                .arg(
+                    Arg::new("experimental")
+                        .long("experimental")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("required to write experimental formats such as int3, int2 and int1"),
                 )
                 .arg(
                     Arg::new("revision")
@@ -202,6 +267,10 @@ fn build_cli() -> Command {
                         .action(clap::ArgAction::SetTrue)
                         .help("nvfp4 only: quantize embedding and lm_head tensors too"),
                 ),
+        )
+        .subcommand(
+            Command::new("formats")
+                .about("List the quantization formats, their status, and whether they need --experimental"),
         )
         .subcommand(
             Command::new("eval")
@@ -305,15 +374,55 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
     let has_nvfp4_options = matches.contains_id("exclude")
         || matches.contains_id("scale-search")
         || matches.get_flag("no-default-excludes");
+    let has_group_size = matches.contains_id("group-size");
+    if let Some(spec) = modelq::quant::formats::find(format) {
+        if spec.requires_experimental_flag && !matches.get_flag("experimental") {
+            return Err(format!(
+                "{format} is experimental; pass --experimental to write it (see `modelq formats`)"
+            ));
+        }
+    }
     match format.as_str() {
         "int8" => {
+            if has_nvfp4_options || has_group_size {
+                return Err(
+                    "--exclude, --no-default-excludes, --scale-search and --group-size do not apply to int8"
+                        .to_owned(),
+                );
+            }
+            run_quantize(matches).map(|report| print_quantize_report(&report))
+        }
+        "int4" | "int3" | "int2" | "int1" => {
             if has_nvfp4_options {
                 return Err(
                     "--exclude, --no-default-excludes and --scale-search apply only to the nvfp4 formats"
                         .to_owned(),
                 );
             }
-            run_quantize(matches).map(|report| print_quantize_report(&report))
+            let (model, output) = quantize_paths(matches)?;
+            require_cpu(matches)?;
+            let target = output::OutputTarget::from_args(
+                output,
+                matches.get_one::<String>("max-shard-size"),
+            )?;
+            let input = resolve_model_input(matches, model)?;
+            let spec = modelq::quant::formats::find(format)
+                .ok_or_else(|| format!("unknown format {format:?}"))?;
+            let bits = spec.bits;
+            let config = modelq::quant::lowbit::LowBitConfig {
+                bits,
+                group_size: matches
+                    .get_one::<u64>("group-size")
+                    .map(|&size| size as usize)
+                    .or(spec.default_group_size)
+                    .ok_or_else(|| "this format needs --group-size".to_owned())?,
+                scheme: if bits == 1 {
+                    modelq::quant::lowbit::Scheme::Sign
+                } else {
+                    modelq::quant::lowbit::Scheme::Symmetric
+                },
+            };
+            lowbit_command::run(&input, &target, config)
         }
         "nvfp4" | "nvfp4-te" => {
             let (model, output) = quantize_paths(matches)?;
@@ -340,7 +449,12 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             nvfp4_command::run(&input, &target, &options)
         }
         other => Err(format!(
-            "unsupported format {other:?}; supported formats are int8, nvfp4 and nvfp4-te"
+            "unsupported format {other:?}; supported formats are {}",
+            modelq::quant::formats::FORMATS
+                .iter()
+                .map(|spec| spec.id)
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -879,6 +993,54 @@ mod tests {
                     "r",
                     "--max-windows",
                     "0",
+                ])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_group_size_and_experimental_flag() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "modelq",
+                "quantize",
+                "in.safetensors",
+                "--format",
+                "int2",
+                "--group-size",
+                "64",
+                "--experimental",
+                "--output",
+                "out.safetensors",
+            ])
+            .expect("quantize arguments are valid");
+        let (_, quantize) = matches.subcommand().expect("quantize is present");
+        assert_eq!(quantize.get_one::<u64>("group-size"), Some(&64));
+        assert!(quantize.get_flag("experimental"));
+    }
+
+    #[test]
+    fn parses_formats_subcommand() {
+        let matches = build_cli()
+            .try_get_matches_from(["modelq", "formats"])
+            .expect("formats takes no arguments");
+        assert_eq!(matches.subcommand_name(), Some("formats"));
+    }
+
+    #[test]
+    fn rejects_zero_group_size() {
+        assert!(
+            build_cli()
+                .try_get_matches_from([
+                    "modelq",
+                    "quantize",
+                    "in",
+                    "--format",
+                    "int4",
+                    "--group-size",
+                    "0",
+                    "--output",
+                    "out",
                 ])
                 .is_err()
         );

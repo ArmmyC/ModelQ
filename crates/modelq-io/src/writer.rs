@@ -70,6 +70,8 @@ pub enum WriterError {
     /// The caller supplied a plan different from the plan derived from the
     /// current source metadata and decisions.
     PlanMismatch,
+    /// A group-wise low-bit encoding failed for one source tensor.
+    Encoding { name: String, detail: String },
     /// A mapped source read failed.
     Source { source: SafetensorsError },
     /// The scalar quantizer rejected one source tensor.
@@ -139,6 +141,9 @@ impl fmt::Display for WriterError {
                 "the supplied output layout does not match the current source metadata and policy",
             ),
             Self::Source { source } => write!(formatter, "could not read source tensor: {source}"),
+            Self::Encoding { name, detail } => {
+                write!(formatter, "could not encode {name:?}: {detail}")
+            }
             Self::Quantization {
                 tensor_name,
                 source,
@@ -919,7 +924,7 @@ fn json_shape(shape: &[usize]) -> Result<Value, WriterError> {
     serde_json::to_value(shape).map_err(|source| WriterError::Serialization { source })
 }
 
-fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), WriterError> {
+pub(crate) fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), WriterError> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let file_name = destination
         .file_name()
@@ -951,14 +956,14 @@ fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), WriterEr
     ))
 }
 
-fn io_error(path: &Path, source: io::Error) -> WriterError {
+pub(crate) fn io_error(path: &Path, source: io::Error) -> WriterError {
     WriterError::Io {
         path: path.to_owned(),
         source,
     }
 }
 
-fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
+pub(crate) fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
     if source == destination {
         return true;
     }
@@ -968,13 +973,13 @@ fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
     }
 }
 
-struct TemporaryOutput {
+pub(crate) struct TemporaryOutput {
     path: PathBuf,
-    committed: bool,
+    pub(crate) committed: bool,
 }
 
 impl TemporaryOutput {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
             committed: false,
