@@ -87,6 +87,8 @@ The core does **not** need to:
 
 This boundary keeps the project focused.
 
+**Exception (ADR 0028):** forward passes are permitted for two purposes only: measuring a quantized model against the original (`modelq eval`, milestone M1) and calibration (milestone M4). Tokenizing evaluation and calibration text is permitted for the same purposes. Generation, sampling, KV caches, attention serving, and inference scheduling remain out of scope.
+
 ### 2.2 No inference does not mean no validation
 
 ModelQ should still verify the numerical transformation.
@@ -408,6 +410,8 @@ Examples in early scope:
 - group-wise INT4
 - basic FP4/FP8 experiments
 - weight-only NVFP4 representation when the algorithm can be defined from weights alone
+
+Revised by ADR 0028: one calibration method (AWQ first, GPTQ later, both behind the same interface) is added as milestone M4, behind an explicit flag, after the data-free path has been measured. The data-free path stays the default.
 
 Out of initial scope:
 
@@ -1623,6 +1627,17 @@ Target features:
 - parallel CPU path after correctness is stable
 - initial extraction of reusable framework modules/crates if the code now justifies it
 
+### v0.4 - open-source quantizer for everyone (ADR 0028)
+
+Goal: anyone can quantize a model on their own machine, measure the quality cost, and see honestly what the output is compatible with.
+
+1. M1: local evaluation (`modelq eval`) on the user's machine, reproducing ADR 0024 within a stated tolerance.
+2. M2: Hugging Face Hub input with cache, checksum, and license display.
+3. M3: format registry with statuses; INT4 group-wise; experimental INT3/INT2/INT1 behind `--experimental`.
+4. M4: one calibration method (AWQ first), with recorded data sources.
+5. M5: GGUF exporter for one exact quant type (Q8_0 first), verified in a pinned llama.cpp version.
+6. M6: GUI over the public API, and signed binaries for Windows, macOS and Linux.
+
 ### v0.3+ - interoperability and performance
 
 Likely sequence:
@@ -1737,20 +1752,19 @@ Mitigation:
 
 ## 24. Non-goals for early development
 
-Do not let Codex expand the project into these areas unless explicitly requested:
+Revised by ADR 0028. The model downloader (Hub input, user side) and calibration are now in scope as milestones M2 and M4 of v0.4. Do not let Codex expand the project into these areas unless explicitly requested:
 
 - training framework
 - inference engine
-- tokenizer implementation
-- model downloader/hub client
+- tokenizer implementation (use existing tokenizer libraries; ADR 0028)
 - model serving
 - chat UI
-- Python bindings
+- Python bindings until the library API is stable (ADR 0028, after M2)
 - distributed quantization
-- automatic calibration datasets
+- automatic calibration datasets (calibration sources are named and recorded; ADR 0028 section 4)
 - every GGUF quant type
 - every NVIDIA format
-- every model architecture
+- every model architecture (architecture policy profiles; unknown tensors are preserved and reported)
 - arbitrary `.pt` pickle execution
 - a generic tensor framework competing with PyTorch/Candle
 

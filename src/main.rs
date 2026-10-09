@@ -1,3 +1,4 @@
+mod eval_command;
 mod nvfp4_command;
 mod output;
 
@@ -25,6 +26,7 @@ fn main() {
             run_inspect(path)
         }
         Some(("quantize", matches)) => run_quantize_command(matches),
+        Some(("eval", matches)) => run_eval_command(matches),
         _ => Ok(()),
     };
 
@@ -64,6 +66,33 @@ fn run_inspect(path: &std::path::Path) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn run_eval_command(matches: &ArgMatches) -> Result<(), String> {
+    let options = eval_command::EvalOptions {
+        model: matches
+            .get_one::<String>("model")
+            .cloned()
+            .unwrap_or_default(),
+        download: matches.get_flag("download"),
+        dataset: matches.get_one::<PathBuf>("dataset").cloned(),
+        containers: matches
+            .get_many::<PathBuf>("container")
+            .map(|values| values.cloned().collect())
+            .unwrap_or_default(),
+        device: matches
+            .get_one::<String>("device")
+            .cloned()
+            .unwrap_or_else(|| "auto".to_owned()),
+        max_windows: matches.get_one::<u64>("max-windows").copied(),
+        report: matches
+            .get_one::<PathBuf>("report")
+            .cloned()
+            .unwrap_or_default(),
+    };
+    let python = eval_command::python_interpreter(matches.get_one::<PathBuf>("python"));
+    let script = eval_command::locate_script()?;
+    eval_command::run(&options, &python, &script)
 }
 
 fn print_error(error: &dyn std::fmt::Display) -> ! {
@@ -155,6 +184,69 @@ fn build_cli() -> Command {
                         .long("no-default-excludes")
                         .action(clap::ArgAction::SetTrue)
                         .help("nvfp4 only: quantize embedding and lm_head tensors too"),
+                ),
+        )
+        .subcommand(
+            Command::new("eval")
+                .about("Measure a quantized output against the original model on WikiText-2 (runs locally; needs Python)")
+                .arg(
+                    Arg::new("model")
+                        .long("model")
+                        .value_name("MODEL")
+                        .required(true)
+                        .help("a local model directory, or a pinned model id with --download"),
+                )
+                .arg(
+                    Arg::new("container")
+                        .long("container")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .action(clap::ArgAction::Append)
+                        .required(true)
+                        .help("a ModelQ NVFP4 Transformer Engine container; repeat to compare several"),
+                )
+                .arg(
+                    Arg::new("dataset")
+                        .long("dataset")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("local WikiText-2 test Parquet file (required without --download)"),
+                )
+                .arg(
+                    Arg::new("download")
+                        .long("download")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("allow downloading the pinned model and dataset"),
+                )
+                .arg(
+                    Arg::new("device")
+                        .long("device")
+                        .value_name("DEVICE")
+                        .value_parser(value_parser!(String))
+                        .default_value("auto")
+                        .help("auto, cpu or cuda"),
+                )
+                .arg(
+                    Arg::new("max-windows")
+                        .long("max-windows")
+                        .value_name("N")
+                        .value_parser(value_parser!(u64).range(1..))
+                        .help("score only the first N windows (a quick check, not comparable to full runs)"),
+                )
+                .arg(
+                    Arg::new("report")
+                        .long("report")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .required(true)
+                        .help("where to write the JSON report"),
+                )
+                .arg(
+                    Arg::new("python")
+                        .long("python")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("Python interpreter (default: $MODELQ_PYTHON, then python)"),
                 ),
         )
 }
@@ -669,6 +761,78 @@ mod tests {
         assert_eq!(
             quantize.get_one::<PathBuf>("output"),
             Some(&PathBuf::from("output.safetensors"))
+        );
+    }
+
+    #[test]
+    fn parses_eval_options() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "modelq",
+                "eval",
+                "--model",
+                "models/qwen",
+                "--dataset",
+                "wikitext.parquet",
+                "--container",
+                "a.safetensors",
+                "--container",
+                "b.safetensors",
+                "--max-windows",
+                "8",
+                "--report",
+                "out.json",
+            ])
+            .expect("eval command arguments are valid");
+        let (_, eval) = matches
+            .subcommand()
+            .expect("the eval subcommand is present");
+
+        let containers: Vec<&PathBuf> = eval.get_many::<PathBuf>("container").unwrap().collect();
+        assert_eq!(containers.len(), 2);
+        assert_eq!(eval.get_one::<u64>("max-windows"), Some(&8));
+        assert_eq!(eval.get_one::<String>("device"), Some(&"auto".to_owned()));
+        assert!(!eval.get_flag("download"));
+    }
+
+    #[test]
+    fn eval_needs_a_container_and_a_report() {
+        assert!(
+            build_cli()
+                .try_get_matches_from(["modelq", "eval", "--model", "m", "--report", "r.json"])
+                .is_err()
+        );
+        assert!(
+            build_cli()
+                .try_get_matches_from([
+                    "modelq",
+                    "eval",
+                    "--model",
+                    "m",
+                    "--container",
+                    "c.safetensors"
+                ])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_zero_max_windows() {
+        assert!(
+            build_cli()
+                .try_get_matches_from([
+                    "modelq",
+                    "eval",
+                    "--model",
+                    "m",
+                    "--container",
+                    "c",
+                    "--report",
+                    "r",
+                    "--max-windows",
+                    "0",
+                ])
+                .is_err()
         );
     }
 
