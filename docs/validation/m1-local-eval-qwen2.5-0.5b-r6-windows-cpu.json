@@ -1,0 +1,50 @@
+{
+  "milestone": "M1 local evaluation (ADR 0028)",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "weights_sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
+  },
+  "dataset": {
+    "id": "Salesforce/wikitext",
+    "file": "wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "sha256": "5f1bea067869d04849c0f975a2b29c4ff47d867f484f5010ea5e861eab246d91"
+  },
+  "text": {
+    "characters": 1294336,
+    "tokens": 299078,
+    "window": 2048,
+    "windows": 146
+  },
+  "variants": {
+    "qwen2.5-0.5b-default-r6-te": {
+      "container_file": "qwen2.5-0.5b-default-r6-te.safetensors",
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.08151147474667855,
+        "relative_frobenius_error_median": 0.08140099048614502,
+        "relative_frobenius_error_max": 0.08520347625017166
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069252506099831,
+        "perplexity_quantized": 14.124354085707548,
+        "mean_kl_original_to_quantized": 0.08026604423895915,
+        "top1_agreement": 0.8534306803809116,
+        "relative_perplexity_increase": 0.08073159341861885
+      }
+    }
+  },
+  "environment": {
+    "python": "3.14.6",
+    "torch": "2.12.1+cpu",
+    "transformers": "5.12.1",
+    "device": "cpu",
+    "dtype": "float32",
+    "os": "Windows 11",
+    "run_on": "local CPU"
+  },
+  "seconds": 3910.6
+}

@@ -202,6 +202,27 @@ the reference rule and reproduces the output of earlier versions byte for byte;
 reference rule as its default. See
 [ADR 0027](docs/adr/0027-scale-search-default.md).
 
+## Evaluating a quantized output
+
+`modelq eval` measures a ModelQ NVFP4 Transformer Engine container against the
+original model on WikiText-2: perplexity, KL divergence, top-1 agreement and
+weight error. It runs on your own machine. The measurement itself is Python
+(PyTorch, transformers, pyarrow, huggingface_hub), so install those first:
+
+```bash
+py -3 -m pip install torch transformers pyarrow huggingface_hub numpy safetensors
+modelq eval --model ./Qwen2.5-0.5B --dataset ./wikitext-2-test.parquet   --container ./te.safetensors --report ./quality.json
+```
+
+Pass `--download` with a pinned model id (currently `Qwen/Qwen2.5-0.5B`) to
+let the script download the model and dataset, each verified against its
+SHA-256. Without `--download`, nothing is downloaded. The script is found in a
+source checkout, or at `MODELQ_EVAL_SCRIPT`; the interpreter is `--python`,
+then `MODELQ_PYTHON`, then `python`. A full run on CPU takes about an hour for
+Qwen2.5-0.5B; `--max-windows N` gives a quick check that is not comparable to
+full runs. Measurements are not certifications; see
+[ADR 0028](docs/adr/0028-open-source-quantizer-scope.md).
+
 ## Requirements
 
 - Stable Rust 1.85 or newer
