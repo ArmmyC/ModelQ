@@ -344,7 +344,7 @@ fn encode_tensor(
         group.push(value);
         if group.len() == config.group_size {
             encode_group(&group, group_start, config, &mut writer, &mut scales)
-                .map_err(&encoding_error)?;
+                .map_err(encoding_error)?;
             group.clear();
             group_start = position + 1;
             payload_bytes += drain(&mut writer, output, destination)?;
@@ -352,7 +352,7 @@ fn encode_tensor(
     }
     if !group.is_empty() {
         encode_group(&group, group_start, config, &mut writer, &mut scales)
-            .map_err(&encoding_error)?;
+            .map_err(encoding_error)?;
     }
     let tail = writer.finish();
     output

@@ -138,3 +138,33 @@ def debug_tests(arguments: str = "-p modelq --test hub_input") -> None:
     result = cargo_test.remote(arguments.split())
     print(f"exit code {result['exit_code']}")
     print(result["output"])
+
+
+# The same toolchain as CI's stable Rust (1.99), so that lints match CI.
+rust_199_image = modal.Image.from_registry("rust:1.99", add_python="3.12").add_local_dir(
+    str(REPO),
+    "/repo",
+    ignore=modal.FilePatternMatcher("target", ".git", "**/__pycache__", "**/*.pyc", "modal_results"),
+)
+
+
+@app.function(image=rust_199_image, cpu=8, memory=32768, timeout=3600)
+def clippy_199() -> dict:
+    """Runs the CI lint command on Rust 1.99 and returns the full output."""
+    version = _run(["rustc", "--version"])
+    installed = _run(["rustup", "component", "add", "clippy"])
+    if installed.returncode != 0:
+        raise RuntimeError("could not add clippy: " + installed.stderr[-2000:])
+    completed = _run(
+        ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+    )
+    output = completed.stdout + completed.stderr
+    return {"rustc": version.stdout.strip(), "exit_code": completed.returncode, "output": output[-120000:]}
+
+
+@app.local_entrypoint()
+def lint_199() -> None:
+    result = clippy_199.remote()
+    print(result["rustc"])
+    print(f"exit code {result['exit_code']}")
+    print(result["output"])
