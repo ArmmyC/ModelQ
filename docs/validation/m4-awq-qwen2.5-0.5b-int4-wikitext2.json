@@ -1,0 +1,1029 @@
+{
+  "milestone": "M4 AWQ calibration (ADR 0031): Qwen2.5-0.5B, INT4 group 128, WikiText-2 test",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "license": "apache-2.0",
+    "weights_sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
+  },
+  "dataset": {
+    "id": "Salesforce/wikitext",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "train_file": "wikitext-2-raw-v1/train-00000-of-00001.parquet",
+    "train_sha256": "e83889baabc497075506f91975be5fac0d45c5290b6b20582c8cd1e853d0c9f7",
+    "test_file": "wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "test_sha256": "5f1bea067869d04849c0f975a2b29c4ff47d867f484f5010ea5e861eab246d91",
+    "license": [
+      "cc-by-sa-3.0",
+      "gfdl"
+    ]
+  },
+  "calibration": {
+    "source": "Salesforce/wikitext@b08601e04326c79dfdd32d625aee71d232d685c3 wikitext-2-raw-v1/train-00000-of-00001.parquet",
+    "windows": 32,
+    "window_length": 512,
+    "window_starts": [
+      0,
+      81223,
+      162446,
+      243669,
+      324892,
+      406115,
+      487338,
+      568561,
+      649783,
+      731006,
+      812229,
+      893452,
+      974675,
+      1055898,
+      1137121,
+      1218344,
+      1299567,
+      1380790,
+      1462013,
+      1543236,
+      1624459,
+      1705682,
+      1786905,
+      1868128,
+      1949350,
+      2030573,
+      2111796,
+      2193019,
+      2274242,
+      2355465,
+      2436688,
+      2517911
+    ],
+    "train_tokens": 2518423,
+    "group_size": 128,
+    "search": {
+      "alpha_grid": [
+        0.0,
+        0.05,
+        0.1,
+        0.15,
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45,
+        0.5,
+        0.55,
+        0.6,
+        0.65,
+        0.7,
+        0.75,
+        0.8,
+        0.85,
+        0.9,
+        0.95
+      ],
+      "blocks": [
+        {
+          "layer": 0,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.05,
+          "error_unscaled": 16396.095039367676,
+          "error_scaled": 14894.945640563965
+        },
+        {
+          "layer": 0,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 393966.546875,
+          "error_scaled": 327604.3828125
+        },
+        {
+          "layer": 0,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 4407.80419921875,
+          "error_scaled": 4159.75390625
+        },
+        {
+          "layer": 1,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 83354.35815429688,
+          "error_scaled": 71810.74230957031
+        },
+        {
+          "layer": 1,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 536827.25,
+          "error_scaled": 477176.9375
+        },
+        {
+          "layer": 1,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 2981.76123046875,
+          "error_scaled": 2893.690673828125
+        },
+        {
+          "layer": 2,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 159685.51171875,
+          "error_scaled": 134914.68090820312
+        },
+        {
+          "layer": 2,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 725792.890625,
+          "error_scaled": 629128.421875
+        },
+        {
+          "layer": 2,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.8,
+          "error_unscaled": 289912.09375,
+          "error_scaled": 6307.1923828125
+        },
+        {
+          "layer": 3,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 186152.798828125,
+          "error_scaled": 159670.4375
+        },
+        {
+          "layer": 3,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 1109440.46875,
+          "error_scaled": 867723.5
+        },
+        {
+          "layer": 3,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.85,
+          "error_unscaled": 140180.828125,
+          "error_scaled": 8365.498046875
+        },
+        {
+          "layer": 4,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 170814.58984375,
+          "error_scaled": 121219.388671875
+        },
+        {
+          "layer": 4,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 988283.25,
+          "error_scaled": 842586.375
+        },
+        {
+          "layer": 4,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 9090.837890625,
+          "error_scaled": 8785.607421875
+        },
+        {
+          "layer": 5,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 192284.796875,
+          "error_scaled": 155436.3095703125
+        },
+        {
+          "layer": 5,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 1655980.1875,
+          "error_scaled": 1279571.8125
+        },
+        {
+          "layer": 5,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.35,
+          "error_unscaled": 9400.1357421875,
+          "error_scaled": 8592.78125
+        },
+        {
+          "layer": 6,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 175806.552734375,
+          "error_scaled": 132238.8759765625
+        },
+        {
+          "layer": 6,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 1070965.0625,
+          "error_scaled": 858679.28125
+        },
+        {
+          "layer": 6,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 9190.232421875,
+          "error_scaled": 8946.150390625
+        },
+        {
+          "layer": 7,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 263066.66796875,
+          "error_scaled": 184126.5859375
+        },
+        {
+          "layer": 7,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 1059246.375,
+          "error_scaled": 840371.3125
+        },
+        {
+          "layer": 7,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.05,
+          "error_unscaled": 10747.2353515625,
+          "error_scaled": 10727.07421875
+        },
+        {
+          "layer": 8,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 230037.142578125,
+          "error_scaled": 165377.724609375
+        },
+        {
+          "layer": 8,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 912103.09375,
+          "error_scaled": 711280.34375
+        },
+        {
+          "layer": 8,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.1,
+          "error_unscaled": 6649.7177734375,
+          "error_scaled": 6617.66796875
+        },
+        {
+          "layer": 9,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 377297.57421875,
+          "error_scaled": 254046.7265625
+        },
+        {
+          "layer": 9,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 784190.78125,
+          "error_scaled": 643311.5625
+        },
+        {
+          "layer": 9,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.0,
+          "error_unscaled": 6703.4365234375,
+          "error_scaled": 6703.4365234375
+        },
+        {
+          "layer": 10,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 176834.826171875,
+          "error_scaled": 129050.8486328125
+        },
+        {
+          "layer": 10,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 767471.75,
+          "error_scaled": 597165.5
+        },
+        {
+          "layer": 10,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.05,
+          "error_unscaled": 5534.60888671875,
+          "error_scaled": 5513.51904296875
+        },
+        {
+          "layer": 11,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 372296.53125,
+          "error_scaled": 289294.8466796875
+        },
+        {
+          "layer": 11,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 724470.9375,
+          "error_scaled": 602095.0
+        },
+        {
+          "layer": 11,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.1,
+          "error_unscaled": 7543.783203125,
+          "error_scaled": 7334.48681640625
+        },
+        {
+          "layer": 12,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 159971.4697265625,
+          "error_scaled": 127551.2626953125
+        },
+        {
+          "layer": 12,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 741164.9375,
+          "error_scaled": 577103.390625
+        },
+        {
+          "layer": 12,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.1,
+          "error_unscaled": 6191.73828125,
+          "error_scaled": 6153.9638671875
+        },
+        {
+          "layer": 13,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 272876.009765625,
+          "error_scaled": 210639.4423828125
+        },
+        {
+          "layer": 13,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 831043.5625,
+          "error_scaled": 626779.4375
+        },
+        {
+          "layer": 13,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.0,
+          "error_unscaled": 8314.681640625,
+          "error_scaled": 8314.681640625
+        },
+        {
+          "layer": 14,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 237594.287109375,
+          "error_scaled": 181712.4296875
+        },
+        {
+          "layer": 14,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 959058.46875,
+          "error_scaled": 696936.5625
+        },
+        {
+          "layer": 14,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 11058.96875,
+          "error_scaled": 10646.146484375
+        },
+        {
+          "layer": 15,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 228571.123046875,
+          "error_scaled": 168858.822265625
+        },
+        {
+          "layer": 15,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 1218261.125,
+          "error_scaled": 876466.5625
+        },
+        {
+          "layer": 15,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 17052.630859375,
+          "error_scaled": 15733.583984375
+        },
+        {
+          "layer": 16,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.4,
+          "error_unscaled": 514741.078125,
+          "error_scaled": 330894.89453125
+        },
+        {
+          "layer": 16,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 1701166.9375,
+          "error_scaled": 1185442.4375
+        },
+        {
+          "layer": 16,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.2,
+          "error_unscaled": 31922.828125,
+          "error_scaled": 29516.1875
+        },
+        {
+          "layer": 17,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 310554.3828125,
+          "error_scaled": 235569.4453125
+        },
+        {
+          "layer": 17,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 2363303.5,
+          "error_scaled": 1532221.1875
+        },
+        {
+          "layer": 17,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.35,
+          "error_unscaled": 24939.853515625,
+          "error_scaled": 22234.255859375
+        },
+        {
+          "layer": 18,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 323126.125,
+          "error_scaled": 241063.4375
+        },
+        {
+          "layer": 18,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.25,
+          "error_unscaled": 1877015.25,
+          "error_scaled": 1324023.8125
+        },
+        {
+          "layer": 18,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 24970.16015625,
+          "error_scaled": 22601.12109375
+        },
+        {
+          "layer": 19,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 319423.1484375,
+          "error_scaled": 194426.955078125
+        },
+        {
+          "layer": 19,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 2983022.5,
+          "error_scaled": 1860156.75
+        },
+        {
+          "layer": 19,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 55983.578125,
+          "error_scaled": 47695.671875
+        },
+        {
+          "layer": 20,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 448823.984375,
+          "error_scaled": 339817.1640625
+        },
+        {
+          "layer": 20,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 3122348.625,
+          "error_scaled": 2132358.625
+        },
+        {
+          "layer": 20,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 97581.171875,
+          "error_scaled": 77816.96875
+        },
+        {
+          "layer": 21,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 516196.59375,
+          "error_scaled": 379965.80859375
+        },
+        {
+          "layer": 21,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 2571577.0,
+          "error_scaled": 2078132.3125
+        },
+        {
+          "layer": 21,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.55,
+          "error_unscaled": 477492.625,
+          "error_scaled": 139420.46875
+        },
+        {
+          "layer": 22,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 473594.609375,
+          "error_scaled": 345248.78515625
+        },
+        {
+          "layer": 22,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 2243205.125,
+          "error_scaled": 1874956.875
+        },
+        {
+          "layer": 22,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 191616.03125,
+          "error_scaled": 123015.609375
+        },
+        {
+          "layer": 23,
+          "block": "A",
+          "linears": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 540480.5,
+          "error_scaled": 343701.8359375
+        },
+        {
+          "layer": 23,
+          "block": "C",
+          "linears": [
+            "mlp.gate_proj",
+            "mlp.up_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 2871832.5,
+          "error_scaled": 2245481.875
+        },
+        {
+          "layer": 23,
+          "block": "D",
+          "linears": [
+            "mlp.down_proj"
+          ],
+          "alpha": 0.3,
+          "error_unscaled": 820920.625,
+          "error_scaled": 234033.359375
+        }
+      ],
+      "total_error_unscaled": 43232106.24958038,
+      "total_error_scaled": 31420415.531211853,
+      "error_reduction": 0.2732157126506687
+    }
+  },
+  "evaluation": {
+    "source": "Salesforce/wikitext@b08601e04326c79dfdd32d625aee71d232d685c3 wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "windows": 146,
+    "window_length": 2048,
+    "test_tokens": 299078
+  },
+  "variants": {
+    "scaled-unquantized": {
+      "substitution": {
+        "matrices_replaced": 290,
+        "relative_frobenius_error_mean": null,
+        "relative_frobenius_error_median": null,
+        "relative_frobenius_error_max": null
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 13.069886176910346,
+        "mean_kl_original_to_quantized": 1.1594003292430552e-10,
+        "top1_agreement": 1.0,
+        "relative_perplexity_increase": 3.624997726063089e-09
+      }
+    },
+    "data-free-int4": {
+      "substitution": {
+        "matrices_replaced": 169,
+        "relative_frobenius_error_mean": 0.13227516456821262,
+        "relative_frobenius_error_median": 0.12954853475093842,
+        "relative_frobenius_error_max": 0.1986646205186844
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 19.885816067878967,
+        "mean_kl_original_to_quantized": 0.43186249642250524,
+        "top1_agreement": 0.6715273269937295,
+        "relative_perplexity_increase": 0.5214988004330049
+      }
+    },
+    "data-free-int4-embedding-kept": {
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.13231826174472058,
+        "relative_frobenius_error_median": 0.12961417436599731,
+        "relative_frobenius_error_max": 0.1986646205186844
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 18.191818421875144,
+        "mean_kl_original_to_quantized": 0.345597901442487,
+        "top1_agreement": 0.7076342927505003,
+        "relative_perplexity_increase": 0.3918880579050993
+      }
+    },
+    "awq-int4": {
+      "substitution": {
+        "matrices_replaced": 169,
+        "relative_frobenius_error_mean": 0.4403094845498807,
+        "relative_frobenius_error_median": 0.25818753242492676,
+        "relative_frobenius_error_max": 6.681705474853516
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 17.485329858476586,
+        "mean_kl_original_to_quantized": 0.2962095010814387,
+        "top1_agreement": 0.7232736179239917,
+        "relative_perplexity_increase": 0.3378333740006838
+      }
+    },
+    "awq-int4-embedding-kept": {
+      "substitution": {
+        "matrices_replaced": 168,
+        "relative_frobenius_error_mean": 0.4421861193453272,
+        "relative_frobenius_error_median": 0.25857284665107727,
+        "relative_frobenius_error_max": 6.681705474853516
+      },
+      "result": {
+        "windows": 146,
+        "positions": 298862,
+        "perplexity_original": 13.069886129532039,
+        "perplexity_quantized": 16.05708635670797,
+        "mean_kl_original_to_quantized": 0.21315979392929757,
+        "top1_agreement": 0.77171068921442,
+        "relative_perplexity_increase": 0.22855594896318246
+      }
+    }
+  },
+  "cross_check": {
+    "data-free-int4": {
+      "matrices_compared": 168,
+      "max_abs_difference": 0.0
+    },
+    "awq-int4": {
+      "matrices_compared": 168,
+      "max_abs_difference": 0.0
+    }
+  },
+  "quantize_reports": {
+    "data-free": [
+      "Final report:",
+      "Source: /tmp/awq/model/model.safetensors",
+      "Output: /tmp/awq/data-free-int4.safetensors",
+      "Format: int4 (symmetric group-wise, group size 128)",
+      "Compatibility: ModelQ-native representation; no inference runtime is claimed",
+      "Tensors: 169 quantized, 121 preserved",
+      "Source bytes: 988097824",
+      "Output bytes: 262701736",
+      "Size: smaller by 725396088 bytes",
+      "Validation: passed (decoded 169 quantized tensors; 121 preserved tensors identical)",
+      "Max MSE: 9.698e-5",
+      "Max MAE: 6.464e-3",
+      "Max absolute error: 1.186e-1",
+      "Lowest SQNR: 14.04 dB",
+      "Values beyond half a group scale: 0 (symmetric rounding allows none)"
+    ],
+    "awq": [
+      "Final report:",
+      "Source: /tmp/awq/awq-scaled.safetensors",
+      "Output: /tmp/awq/awq-int4.safetensors",
+      "Format: int4 (symmetric group-wise, group size 128)",
+      "Compatibility: ModelQ-native representation; no inference runtime is claimed",
+      "Tensors: 169 quantized, 121 preserved",
+      "Source bytes: 1665301888",
+      "Output bytes: 262787512",
+      "Size: smaller by 1402514376 bytes",
+      "Validation: passed (decoded 169 quantized tensors; 121 preserved tensors identical)",
+      "Max MSE: 2.747e-4",
+      "Max MAE: 1.397e-2",
+      "Max absolute error: 1.628e-1",
+      "Lowest SQNR: 13.41 dB",
+      "Values beyond half a group scale: 0 (symmetric rounding allows none)"
+    ]
+  },
+  "environment": {
+    "torch": "2.9.0+cu128",
+    "transformers": "4.57.6",
+    "gpu": "NVIDIA L4",
+    "dtype": "float32"
+  },
+  "seconds": 1230.6
+}
