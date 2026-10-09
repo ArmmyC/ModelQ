@@ -2,6 +2,7 @@
 
 pub mod gguf;
 pub mod layout;
+pub mod lowbit;
 pub mod nvfp4;
 pub mod safetensors;
 pub mod sharded;
