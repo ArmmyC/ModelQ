@@ -130,6 +130,18 @@ pub const FORMATS: &[FormatSpec] = &[
         specification: "ADR 0030",
     },
     FormatSpec {
+        id: "gguf-q8_0",
+        bits: 8,
+        scheme: "GGUF Q8_0: 32-value blocks, F16 scale",
+        default_group_size: Some(32),
+        status: Status::RuntimeCompatible {
+            runtime: "llama.cpp v0.6.0 (Qwen2, CPU)",
+        },
+        requires_experimental_flag: false,
+        container: "GGUF v3 (llama.cpp)",
+        specification: "ADR 0008, ADR 0032",
+    },
+    FormatSpec {
         id: "nvfp4",
         bits: 4,
         scheme: "E2M1 values, E4M3 block scales, F32 tensor scale",

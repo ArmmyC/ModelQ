@@ -148,7 +148,10 @@ pub fn default_cache_dir() -> Result<PathBuf, String> {
 
 /// Downloads (or reuses) the weights of one model revision and returns the
 /// directory that holds them. Prints the license and every step.
-pub fn fetch(request: &Request) -> Result<PathBuf, String> {
+/// Fetches the weights of a model revision, and also the named `extras` (for
+/// example the config and tokenizer a GGUF export needs). Each extra must exist
+/// in the repository, and each is verified the same way as the weights.
+pub fn fetch(request: &Request, extras: &[&str]) -> Result<PathBuf, String> {
     validate_revision(&request.revision)?;
     let agent = agent();
     let info = repo_info(&agent, request)?;
@@ -169,6 +172,17 @@ pub fn fetch(request: &Request) -> Result<PathBuf, String> {
                 })?;
             files.push(file.clone());
         }
+    }
+    for extra in extras {
+        if files.iter().any(|file| file.name == *extra) {
+            continue;
+        }
+        let file = info
+            .files
+            .iter()
+            .find(|candidate| candidate.name == *extra)
+            .ok_or_else(|| format!("{} has no {extra}", request.repo.path()))?;
+        files.push(file.clone());
     }
 
     let directory = request
