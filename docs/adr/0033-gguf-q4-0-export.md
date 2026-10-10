@@ -38,7 +38,7 @@ Two-dimensional weights become Q4_0, including the token embedding and the outpu
 
 llama.cpp's quantizer follows the same policy. In `src/llama-quant.cpp` at the pinned commit, the `*_norm.weight` tensors are excluded (line 300), and `output.weight` is quantized unless `quantize_output_tensor` is off (line 302). No condition excludes the embedding. The one Q4_0-specific rule there moves some `ffn_down` layers to Q4_1 (lines 661 to 666). It applies only when an importance matrix is given, and ModelQ does not use one.
 
-Quantizing the embedding costs more quality at 4 bits than at 8. The verification measures the total cost; it does not split out the embedding. Keeping the embedding at a higher precision is still an open decision (ADR 0028), and it would change this format's output bytes.
+Quantizing the embedding costs more quality at 4 bits than at 8. The verification measures the total cost, and the follow-up in Verification item 6 splits it. Keeping the embedding at a higher precision is still an open decision (ADR 0028), and it would change this format's output bytes.
 
 ### 3. Status
 
@@ -76,7 +76,21 @@ Everything ran on Linux in Modal, against the pinned release and the pinned Qwen
 
    llama.cpp is 0.14% above the decoded Python value (criterion 4, within 1%). Under this rule the Q4_0 file is 15.9% above the original; the Q8_0 file was 0.05% above. Scoring every position of each window gives 12.701 for the original and 14.780 for the decoded Q4_0 file (+16.4%), so the two rules agree on the size of the cost.
 
-   This is a large cost. The file runs and matches the runtime, but on this model it loses a lot of quality. The split between the embedding and the linear layers is not measured.
+   This is a large cost. The file runs and matches the runtime, but on this model it loses a lot of quality. The split between the embedding and the linear layers is measured in the follow-up below.
+
+6. **Follow-up: where the cost comes from.** The same Python evaluation was repeated with each part of the model at its original, Q4_0 or Q8_0 value (`tools/gguf/modal_embedding_split.py`; evidence: [`m5-gguf-q4_0-embedding-split-qwen2.5-0.5b.json`](../validation/m5-gguf-q4_0-embedding-split-qwen2.5-0.5b.json)). Under llama.cpp's rule:
+
+   | Embedding (`model.embed_tokens`) | Linear layers | Perplexity | Increase | File (estimate) |
+   | --- | --- | --- | --- | --- |
+   | original | original | 11.304 | 0 | 752 MB |
+   | Q4_0 | Q4_0 (the file above) | 13.106 | +15.9% | 284 MB |
+   | Q4_0 | original | 11.714 | +3.6% | 284 MB |
+   | original | Q4_0 | 12.597 | +11.4% | 752 MB |
+   | Q8_0 | Q4_0 | 12.605 | +11.5% | 352 MB |
+
+   The embedding accounts for about 4.5 of the 15.9 points: the 4-bit embedding costs 3.6 points alone, and 4.5 points on top of the 4-bit linear layers. Keeping it at Q8_0 recovers almost all of that, for about 68 MB more than the Q4_0 file. Full precision improves on Q8_0 by only 0.07 points, and costs about 468 MB more. The 4-bit linear layers cost 11.4 points alone; the rest of the 15.9 is an interaction of about 0.9 points. The Q4_0 round trip reproduces ADR 0033's numbers exactly, so the method is the same one.
+
+   The Q8_0 embedding here comes from gguf-py's quantizer, which can differ from ModelQ's Q8_0 on exact rounding ties. The effect of that difference is far smaller than the differences measured here.
 
 ## Status
 
@@ -86,7 +100,7 @@ The status is **runtime-compatible: llama.cpp v0.6.0 (Qwen2, CPU)**. All four ac
 
 - One architecture, one model size, one quantization type. Other `qwen2` models, and other architectures, are not measured.
 - CPU only. The GPU backends of llama.cpp are not verified.
-- The quality cost is measured on one model, with 20 windows and one prompt. The 16% increase is what this file costs on Qwen2.5-0.5B. Larger models usually lose less. The embedding may account for much of the cost, but that is not measured here.
+- The quality cost is measured on one model, with 20 windows and one prompt. The 16% increase is what this file costs on Qwen2.5-0.5B. Larger models usually lose less. The follow-up measures the split between the embedding and the linear layers on this model only.
 - Q4_0 is the simplest 4-bit type. Q4_K_M, which most people download, is generally more accurate at a similar size. ModelQ does not write or verify it; that is the next decision.
 - The file is single-file only, with no chat template.
 
@@ -94,4 +108,5 @@ The status is **runtime-compatible: llama.cpp v0.6.0 (Qwen2, CPU)**. All four ac
 
 - A user can produce a 4-bit Qwen2 file in one command that llama.cpp loads and runs, at about half the size of the Q8_0 file.
 - On this model the file is much worse than the Q8_0 file. A user who needs quality should use Q8_0 until a more accurate 4-bit type exists.
-- Whether the embedding stays at a higher precision is the open decision this measurement bears on. A follow-up measurement with the embedding kept at Q8_0 would show how much of the 16% it accounts for. That measurement is not done here.
+- Whether the embedding stays at a higher precision is the open decision (ADR 0028). The follow-up shows that a Q8_0 embedding recovers almost all of the embedding's share of the cost, for about 68 MB. The export does not change: the policy is still llama.cpp's, so the Q4_0 file keeps the 4-bit embedding. Changing that default changes the output bytes, so it needs a separate decision.
+- The linear layers, at 4 bits, account for about 11 of the 16 points. That part is not addressed by the embedding choice; it is what a more accurate 4-bit type such as Q4_K_M would have to improve.
