@@ -116,6 +116,11 @@ pub enum DecisionReason {
         /// Configured minimum number of elements.
         minimum_elements: usize,
     },
+    /// The tensor's name contains a listed part, so it keeps its source precision.
+    ExcludedByName {
+        /// The name part that matched.
+        pattern: &'static str,
+    },
 }
 
 impl fmt::Display for DecisionReason {
@@ -136,6 +141,10 @@ impl fmt::Display for DecisionReason {
             } => write!(
                 formatter,
                 "floating tensor has {element_count} elements, meeting minimum {minimum_elements}"
+            ),
+            Self::ExcludedByName { pattern } => write!(
+                formatter,
+                "tensor name contains {pattern:?}, so it keeps its source precision"
             ),
         }
     }
@@ -225,6 +234,47 @@ impl QuantizationPolicy {
 impl Default for QuantizationPolicy {
     fn default() -> Self {
         Self::new(DEFAULT_MINIMUM_ELEMENTS)
+    }
+}
+
+/// Preserves every decided tensor whose name contains one of `name_parts`.
+///
+/// A format uses this to keep named tensors, such as the vocabulary matrices,
+/// at their source precision. Only the action and the reason change; the
+/// element count and the kind stay as the policy decided them.
+pub fn preserve_named(decisions: &mut [TensorDecision], name_parts: &[&'static str]) {
+    for decision in decisions {
+        let matched = name_parts
+            .iter()
+            .find(|part| decision.name.contains(**part));
+        if let Some(&pattern) = matched {
+            decision.action = PolicyAction::Preserve;
+            decision.reason = DecisionReason::ExcludedByName { pattern };
+        }
+    }
+}
+
+#[cfg(test)]
+mod preserve_named_tests {
+    use super::{
+        DecisionReason, PolicyAction, QuantizationPolicy, TensorCandidate, preserve_named,
+    };
+
+    #[test]
+    fn named_tensors_keep_their_source_precision_and_the_rest_are_unchanged() {
+        let mut decisions = QuantizationPolicy::default().decide_all([
+            TensorCandidate::floating("model.embed_tokens.weight", 1 << 20),
+            TensorCandidate::floating("model.layers.0.mlp.up_proj.weight", 1 << 20),
+        ]);
+        preserve_named(&mut decisions, &["embed_tokens", "lm_head"]);
+        assert_eq!(decisions[0].action, PolicyAction::Preserve);
+        assert_eq!(
+            decisions[0].reason,
+            DecisionReason::ExcludedByName {
+                pattern: "embed_tokens"
+            }
+        );
+        assert_eq!(decisions[1].action, PolicyAction::Quantize);
     }
 }
 

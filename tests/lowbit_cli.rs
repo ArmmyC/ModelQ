@@ -355,3 +355,71 @@ fn an_existing_output_is_not_replaced() {
     assert!(!result.status.success());
     assert_eq!(fs::read(&output_path).unwrap(), b"previous");
 }
+
+/// A SafeTensors source with the named F32 tensors a test needs.
+fn write_named_source(path: &Path, tensors: &[(&str, Vec<usize>, Vec<f32>)]) {
+    let mut header = Map::new();
+    let mut data = Vec::new();
+    for (name, shape, tensor_values) in tensors {
+        let begin = data.len();
+        for value in tensor_values {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        header.insert(
+            (*name).to_owned(),
+            json!({"dtype": "F32", "shape": shape, "data_offsets": [begin, data.len()]}),
+        );
+    }
+    let mut json = serde_json::to_vec(&Value::Object(header)).unwrap();
+    while json.len() % 8 != 0 {
+        json.push(b' ');
+    }
+    let mut bytes = (json.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(&json);
+    bytes.extend_from_slice(&data);
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn int4_keeps_the_vocabulary_matrices_at_source_precision_by_default() {
+    let dir = TestDir::new("vocabulary");
+    let source = dir.join("source.safetensors");
+    write_named_source(
+        &source,
+        &[
+            (
+                "model.embed_tokens.weight",
+                vec![64, 128],
+                values(64 * 128, 4.0),
+            ),
+            (
+                "model.layers.0.weight",
+                vec![64, 128],
+                values(64 * 128, 5.0),
+            ),
+        ],
+    );
+    let output_path = dir.join("int4.safetensors");
+    let result = quantize(&source, &["--format", "int4"], &output_path);
+    assert!(
+        result.status.success(),
+        "{}{}",
+        stdout(&result),
+        stderr(&result)
+    );
+    assert!(
+        stdout(&result).contains("1 quantized, 1 preserved"),
+        "{}",
+        stdout(&result)
+    );
+    let reader = MappedSafetensors::open(&output_path).unwrap();
+    let manifest: Value = serde_json::from_str(&reader.metadata()["modelq.manifest"]).unwrap();
+    assert_eq!(
+        manifest["tensors"]["model.embed_tokens.weight"]["action"],
+        "preserved"
+    );
+    assert_eq!(
+        manifest["tensors"]["model.layers.0.weight"]["action"],
+        "quantized"
+    );
+}

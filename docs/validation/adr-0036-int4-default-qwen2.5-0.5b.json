@@ -1,0 +1,41 @@
+{
+  "milestone": "ADR 0036: the INT4 default keeps the vocabulary matrices at source precision (Qwen2.5-0.5B)",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "before": {
+    "description": "the previous default: the embedding quantized to 4 bits (ADR 0031's data-free INT4)",
+    "output_bytes": 262701736,
+    "perplexity_original": 13.069886129532039,
+    "perplexity_quantized_full_split": 19.885816067878967,
+    "relative_perplexity_increase": 0.5214988004330049,
+    "source": "modal_results eval-containers run (full split), and docs/validation/m4-awq-qwen2.5-0.5b-int4-wikitext2.json"
+  },
+  "after": {
+    "description": "the new default: the embedding and output head preserved at source precision",
+    "output_bytes": 462649320,
+    "quantize_report": [
+      "Format: int4 (symmetric group-wise, group size 128, 4 bits per value)",
+      "Planning: 290 source tensors, 168 quantized, 122 preserved, 458 output tensors, 462507776 data bytes"
+    ],
+    "validation": [],
+    "perplexity_original": 13.069886129532039,
+    "perplexity_quantized_full_split": 18.191818421875144,
+    "relative_perplexity_increase": 0.3918880579050993,
+    "mean_kl_original_to_quantized": 0.345597901442487,
+    "top1_agreement": 0.7076342927505003,
+    "windows": 146,
+    "matrices_replaced": 168
+  },
+  "anchor": {
+    "adr_0031_embedding_kept_full_split": 18.191818421875144,
+    "measured": 18.191818421875144,
+    "difference": 0.0
+  },
+  "size_difference_bytes": 199947584,
+  "environment": {
+    "gpu": "NVIDIA L4 (Python and modelq eval)",
+    "modal_seconds": 296.8
+  }
+}

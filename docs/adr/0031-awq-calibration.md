@@ -91,7 +91,7 @@ The first measurement had both defects. The final run (reported here) has neithe
 
 - AWQ is accepted as the first calibration method: on the same evaluation it beats the data-free method under both policies (ADR 0028 M4 acceptance).
 - It is not the default. The data-free path remains the default, and calibration is opt-in.
-- The embedding policy is the open decision. The embedding-kept variant is better for both methods, and it matches the NVFP4 default. Making it the INT4 default would change the bytes of every default INT4 output, so it should be a separate decision, as the scale-search default was (ADR 0027).
+- The embedding policy is the open decision. The embedding-kept variant is better for both methods, and it matches the NVFP4 default. Making it the INT4 default would change the bytes of every default INT4 output, so it should be a separate decision, as the scale-search default was (ADR 0027). Decided in [ADR 0036](0036-int4-default.md): the INT4 default keeps the embedding at its source precision.
 
 ## Consequences
 

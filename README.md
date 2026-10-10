@@ -213,7 +213,10 @@ modelq formats
 
 Group-wise integer formats store `--group-size` values (default 128) per
 scale: `int4` is symmetric and stable; `int3`, `int2` and `int1` are
-experimental and need `--experimental`, which is a deliberate guard:
+experimental and need `--experimental`, which is a deliberate guard. By
+default `int4` keeps the token embedding and the output head at their source
+precision, as the NVFP4 default does, and quantizes the rest
+([ADR 0036](docs/adr/0036-int4-default.md)):
 
 ```bash
 modelq quantize ./model.safetensors --format int4 --output ./int4.safetensors

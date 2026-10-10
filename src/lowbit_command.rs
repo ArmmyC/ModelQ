@@ -18,7 +18,8 @@ use modelq::{
     },
     quant::{
         lowbit::{LowBitConfig, Scheme},
-        policy::{PolicyAction, QuantizationPolicy, TensorDecision},
+        nvfp4_policy::DEFAULT_EXCLUDED_NAME_PARTS,
+        policy::{PolicyAction, QuantizationPolicy, TensorDecision, preserve_named},
     },
 };
 
@@ -41,7 +42,13 @@ pub fn run(input: &Path, target: &OutputTarget, config: LowBitConfig) -> Result<
         .iter()
         .map(crate::candidate_for)
         .collect::<Result<Vec<_>, _>>()?;
-    let decisions = QuantizationPolicy::default().decide_all(candidates);
+    let mut decisions = QuantizationPolicy::default().decide_all(candidates);
+    // The INT4 default keeps the vocabulary matrices at their source precision,
+    // with the names the NVFP4 default preserves (ADR 0036). The experimental
+    // formats keep the quantize-everything default.
+    if config.bits == 4 {
+        preserve_named(&mut decisions, DEFAULT_EXCLUDED_NAME_PARTS);
+    }
     let encoding = encoding_for(&config);
     let plan = plan_output_layout_for(&summaries, &decisions, encoding)
         .map_err(|error| format!("could not plan output: {error}"))?;
