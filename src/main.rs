@@ -392,6 +392,39 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
         }
+        "gguf-q8_0" => {
+            if has_nvfp4_options || has_group_size || matches.contains_id("max-shard-size") {
+                return Err(
+                    "--exclude, --no-default-excludes, --scale-search, --group-size and --max-shard-size do not apply to gguf-q8_0"
+                        .to_owned(),
+                );
+            }
+            let (model, output) = quantize_paths(matches)?;
+            require_cpu(matches)?;
+            let input = resolve_model_input_with(matches, model, GGUF_EXTRAS)?;
+            if !input.is_dir() {
+                return Err(format!(
+                    "gguf-q8_0 needs a model directory with config.json, tokenizer.json, tokenizer_config.json and the weights; {} is not one",
+                    input.display()
+                ));
+            }
+            let report = modelq::io::gguf_qwen2::export_qwen2_q8_0(&input, &output)
+                .map_err(|error| error.to_string())?;
+            println!("Format: gguf-q8_0 (GGUF v3, qwen2 architecture, Q8_0 weights)");
+            println!(
+                "Written: {} ({} bytes)",
+                output.display(),
+                report.output_bytes
+            );
+            println!(
+                "Tensors: {} Q8_0, {} F32; metadata entries: {}; vocabulary: {}",
+                report.q8_0_tensors, report.f32_tensors, report.metadata_entries, report.vocab_size
+            );
+            println!(
+                "Compatibility: see `modelq formats` for the verified runtime status (ADR 0032)"
+            );
+            Ok(())
+        }
         "int4" | "int3" | "int2" | "int1" => {
             if has_nvfp4_options {
                 return Err(
@@ -463,6 +496,15 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
 /// returned unchanged. Called only after the output path has been validated,
 /// so a bad output never causes a download.
 fn resolve_model_input(matches: &ArgMatches, model: PathBuf) -> Result<PathBuf, String> {
+    resolve_model_input_with(matches, model, &[])
+}
+
+/// Like [`resolve_model_input`], and for a Hub model also fetches `extras`.
+fn resolve_model_input_with(
+    matches: &ArgMatches,
+    model: PathBuf,
+    extras: &[&str],
+) -> Result<PathBuf, String> {
     let repo_text = model
         .to_str()
         .and_then(|text| text.strip_prefix(hub::PREFIX))
@@ -479,14 +521,20 @@ fn resolve_model_input(matches: &ArgMatches, model: PathBuf) -> Result<PathBuf, 
         .get_one::<String>("revision")
         .cloned()
         .unwrap_or_else(|| "main".to_owned());
-    hub::fetch(&hub::Request {
-        repo,
-        revision,
-        cache_dir,
-        endpoint: hub::endpoint_from_env(),
-        token: hub::token_from_env(),
-    })
+    hub::fetch(
+        &hub::Request {
+            repo,
+            revision,
+            cache_dir,
+            endpoint: hub::endpoint_from_env(),
+            token: hub::token_from_env(),
+        },
+        extras,
+    )
 }
+
+/// The files a GGUF export reads besides the weights.
+const GGUF_EXTRAS: &[&str] = &["config.json", "tokenizer.json", "tokenizer_config.json"];
 
 fn quantize_paths(matches: &ArgMatches) -> Result<(PathBuf, PathBuf), String> {
     let input = matches
