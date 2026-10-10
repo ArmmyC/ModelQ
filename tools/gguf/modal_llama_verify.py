@@ -134,6 +134,8 @@ def verify(format_id: str = "gguf-q8_0") -> dict:
     if format_id not in FORMATS:
         raise ValueError(f"{format_id} is not one of {FORMATS}")
     wanted = {"gguf-q8_0": gguf.GGMLQuantizationType.Q8_0, "gguf-q4_0": gguf.GGMLQuantizationType.Q4_0}[format_id]
+    # A Q4_0 file keeps its vocabulary matrices at Q8_0 (ADR 0034), so both types are decoded.
+    block_types = (gguf.GGMLQuantizationType.Q4_0, gguf.GGMLQuantizationType.Q8_0)
     tag = format_id.removeprefix("gguf-")
 
     started = time.time()
@@ -179,8 +181,8 @@ def verify(format_id: str = "gguf-q8_0") -> dict:
             if hf_name is None:
                 raise RuntimeError(f"tensor {tensor.name} has no Hugging Face name")
             reference = source.get_tensor(hf_name).to(torch.float32).numpy()
-            if tensor.tensor_type == wanted:
-                decoded = gguf.quants.dequantize(tensor.data, wanted)
+            if tensor.tensor_type in block_types:
+                decoded = gguf.quants.dequantize(tensor.data, tensor.tensor_type)
             else:
                 decoded = np.asarray(tensor.data, dtype=np.float32)
             decoded = decoded.reshape(reference.shape)
@@ -227,6 +229,7 @@ def verify(format_id: str = "gguf-q8_0") -> dict:
         "blocks": sum(c.get("blocks", 0) for c in comparisons.values()),
         "blocks_differing_from_gguf_py": sum(c.get("blocks_differing_from_gguf_py", 0) for c in comparisons.values()),
         "by_name": {k: comparisons[k] for k in list(comparisons)[:8]},
+        "eight_bit_tensors": {k: v for k, v in comparisons.items() if v["type"] == "Q8_0"},
     }
 
     # --- 3. llama.cpp at the pinned tag ---------------------------------------------------
@@ -282,8 +285,8 @@ def verify(format_id: str = "gguf-q8_0") -> dict:
         loaded = 0
         for tensor in reader.tensors:
             hf_name = _hf_name(tensor.name)
-            if tensor.tensor_type == wanted:
-                values = gguf.quants.dequantize(tensor.data, wanted)
+            if tensor.tensor_type in block_types:
+                values = gguf.quants.dequantize(tensor.data, tensor.tensor_type)
             else:
                 values = np.asarray(tensor.data, dtype=np.float32)
             parameter = parameters.get(hf_name)

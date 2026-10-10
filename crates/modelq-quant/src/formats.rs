@@ -144,14 +144,14 @@ pub const FORMATS: &[FormatSpec] = &[
     FormatSpec {
         id: "gguf-q4_0",
         bits: 4,
-        scheme: "GGUF Q4_0: 32-value blocks, F16 scale, codes -8..7",
+        scheme: "GGUF Q4_0: 32-value blocks, F16 scale, codes -8..7; Q8_0 embedding and output head",
         default_group_size: Some(32),
         status: Status::RuntimeCompatible {
             runtime: "llama.cpp v0.6.0 (Qwen2, CPU)",
         },
         requires_experimental_flag: false,
         container: "GGUF v3 (llama.cpp)",
-        specification: "ADR 0033",
+        specification: "ADR 0033, ADR 0034",
     },
     FormatSpec {
         id: "nvfp4",

@@ -1,0 +1,69 @@
+{
+  "milestone": "M5 GGUF Q4_0 with an 8-bit vocabulary matrix (ADR 0034), Qwen2.5-0.5B, verified with llama.cpp v0.6.0",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "llama_cpp": {
+    "tag": "v0.6.0",
+    "commit": "d81235049384534c167caea52b85a694f6103d14"
+  },
+  "export": {
+    "exit_code": 0,
+    "bytes": 352151616,
+    "report_lines": [
+      "Format: gguf-q4_0 (GGUF v3, qwen2 architecture, Q4_0 weights)",
+      "Written: /tmp/gguf/qwen2.5-0.5b-q4_0.gguf (352151616 bytes)",
+      "Tensors: 168 Q4_0, 1 Q8_0, 121 F32; metadata entries: 19; vocabulary: 151936"
+    ]
+  },
+  "gguf_reader": {
+    "architecture": "qwen2",
+    "tensor_count": 290,
+    "vocabulary_size": 151936
+  },
+  "gguf_tensors": {
+    "checked": 290,
+    "worst_abs_error": 0.103515625,
+    "q4_0_bound": "per 32-value block: (1 + 2^-8) * max|block| / 8 (ADR 0033), checked block by block",
+    "q4_0_blocks": 11182080,
+    "q4_0_blocks_differing_from_gguf_py": 0,
+    "q8_0_tensors": {
+      "token_embd.weight": {
+        "type": "Q8_0",
+        "max_abs_difference": 0.0007905960083007812,
+        "half_scale_bound": 0.000907529996136042
+      }
+    }
+  },
+  "generation": {
+    "prompt": "The capital of France is",
+    "exit_code": 0,
+    "text": " Paris. It is the capital of France. It is the capital of France. It is the capital of France. It\n\n"
+  },
+  "perplexity": {
+    "windows": 20,
+    "window_length": 2048,
+    "llama_cpp_default_scoring": {
+      "description": "llama.cpp perplexity: second half of each window scored",
+      "llama_cpp": 12.6281
+    },
+    "same_scoring_rule_python": {
+      "scored_tokens": 20460,
+      "original": 11.304229573464996,
+      "decoded_file": 12.604913106700563,
+      "relative_increase_vs_original": 0.11506167003974599,
+      "llama_cpp_relative_to_decoded": 0.0018395123475394293
+    },
+    "all_positions_python": {
+      "original": 12.701029116355178,
+      "decoded_file": 14.216804915771643,
+      "relative_increase_vs_original": 0.11934275447527254
+    }
+  },
+  "environment": {
+    "gpu_reference": "NVIDIA L4 (Python)",
+    "llama_cpp_build": "CPU, 8 threads",
+    "modal_seconds": 1785.1
+  }
+}

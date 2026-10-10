@@ -422,8 +422,9 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                 report.output_bytes
             );
             println!(
-                "Tensors: {} {quantization:?}, {} F32; metadata entries: {}; vocabulary: {}",
-                report.quantized_tensors,
+                "Tensors: {} Q4_0, {} Q8_0, {} F32; metadata entries: {}; vocabulary: {}",
+                report.four_bit_tensors,
+                report.eight_bit_tensors,
                 report.f32_tensors,
                 report.metadata_entries,
                 report.vocab_size
