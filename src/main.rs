@@ -414,9 +414,16 @@ struct ValidationReport {
 }
 
 fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
-    let format = matches
-        .get_one::<String>("format")
-        .ok_or_else(|| "quantize requires --format <int8|nvfp4|nvfp4-te>".to_owned())?;
+    let format = matches.get_one::<String>("format").ok_or_else(|| {
+        format!(
+            "quantize requires --format <{}>",
+            modelq::quant::formats::FORMATS
+                .iter()
+                .map(|spec| spec.id)
+                .collect::<Vec<_>>()
+                .join("|")
+        )
+    })?;
     let calibrating = matches.contains_id("calibration");
     if calibrating && format != "int4" {
         return Err("--calibration applies only to --format int4 (ADR 0037)".to_owned());
