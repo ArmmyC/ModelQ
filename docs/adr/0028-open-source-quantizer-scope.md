@@ -113,9 +113,9 @@ None on existing outputs. The default output stays as in ADR 0027. New formats a
 ## Open questions
 
 1. ~~Project license~~ Decided: Apache-2.0.
-2. Calibration methods: both GPTQ and AWQ are to be supported over time. M4 implements the first one; the calibration interface must accept the second without redesign. Which one comes first is still open.
-3. GGUF quant type for M5: open. Candidates are Q8_0 (already spiked on main) for the first exporter, then a 4-bit type for normal users.
-4. Is signed Windows distribution in scope now, or after M5?
+2. ~~Calibration methods~~ Decided: AWQ comes first (ADR 0031). GPTQ is to be supported later, and the calibration interface must accept it without redesign.
+3. ~~GGUF quant type for M5~~ Decided: Q8_0 first (ADR 0032), then Q4_0 with its vocabulary matrices at 8 bits (ADRs 0033 and 0034). Q4_K_M is not started.
+4. ~~Is signed Windows distribution in scope now, or after M5?~~ Decided: Windows releases ship unsigned for now. Signing is part of M6, and it waits for a signing route. Smart App Control can block unsigned executables on Windows.
 
 ## Calibration needs forward passes
 
