@@ -19,7 +19,9 @@
       "Format: int4 (symmetric group-wise, group size 128, 4 bits per value)",
       "Planning: 290 source tensors, 168 quantized, 122 preserved, 458 output tensors, 462507776 data bytes"
     ],
-    "validation": [],
+    "validation": [
+      "Validation: passed (decoded 168 quantized tensors; 122 preserved tensors identical)"
+    ],
     "perplexity_original": 13.069886129532039,
     "perplexity_quantized_full_split": 18.191818421875144,
     "relative_perplexity_increase": 0.3918880579050993,
