@@ -1,0 +1,62 @@
+{
+  "milestone": "M5 GGUF Q4_0 export (ADR 0033), Qwen2.5-0.5B, verified with llama.cpp v0.6.0",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "llama_cpp": {
+    "tag": "v0.6.0",
+    "commit": "d81235049384534c167caea52b85a694f6103d14"
+  },
+  "export": {
+    "exit_code": 0,
+    "bytes": 284084288,
+    "report_lines": [
+      "Format: gguf-q4_0 (GGUF v3, qwen2 architecture, Q4_0 weights)",
+      "Written: /tmp/gguf/qwen2.5-0.5b-q4_0.gguf (284084288 bytes)",
+      "Tensors: 169 Q4_0, 121 F32; metadata entries: 19; vocabulary: 151936"
+    ]
+  },
+  "gguf_reader": {
+    "architecture": "qwen2",
+    "tensor_count": 290,
+    "vocabulary_size": 151936
+  },
+  "gguf_tensors": {
+    "checked": 290,
+    "worst_abs_error": 0.103515625,
+    "bound": "per 32-value Q4_0 block: (1 + 2^-8) * max|block| / 8 (binary16 scale and the clamped extreme; ADR 0033), checked block by block",
+    "blocks": 15436288,
+    "blocks_differing_from_gguf_py": 0
+  },
+  "generation": {
+    "prompt": "The capital of France is",
+    "exit_code": 0,
+    "text": " ______.\nA. Paris\nB. London\nC. Tokyo\nD. Shanghai\nAnswer: A\n\nThe most\n\n"
+  },
+  "perplexity": {
+    "windows": 20,
+    "window_length": 2048,
+    "llama_cpp_default_scoring": {
+      "description": "llama.cpp perplexity: second half of each window scored",
+      "llama_cpp_q4_0": 13.1242
+    },
+    "same_scoring_rule_python": {
+      "scored_tokens": 20460,
+      "original": 11.304229573464996,
+      "decoded_q4_0": 13.106253859095489,
+      "relative_increase_vs_original": 0.15941150822524675,
+      "llama_cpp_relative_to_decoded": 0.0013692807340257573
+    },
+    "all_positions_python": {
+      "original": 12.701029116355178,
+      "decoded_q4_0": 14.780485687961873,
+      "relative_increase_vs_original": 0.16372347095315032
+    }
+  },
+  "environment": {
+    "gpu_reference": "NVIDIA L4 (Python)",
+    "llama_cpp_build": "CPU, 8 threads",
+    "modal_seconds": 1910.4
+  }
+}

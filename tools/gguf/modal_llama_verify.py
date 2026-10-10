@@ -1,22 +1,27 @@
-"""Runtime verification of ModelQ's GGUF Q8_0 export with llama.cpp (ADR 0032, M5).
+"""Runtime verification of ModelQ's GGUF exports with llama.cpp (ADR 0032 for Q8_0, ADR 0033 for Q4_0).
 
 Everything runs in one Modal container with a GPU (for the reference model)
 and the CPU (for llama.cpp). Nothing is downloaded to the local machine.
 
 1. builds the release CLI and exports the pinned Qwen2.5-0.5B revision with
-   `modelq quantize hf:... --format gguf-q8_0`;
+   `modelq quantize hf:... --format <format>`;
 2. checks the file with llama.cpp's own GGUF reader library (the `gguf` package)
-   and compares each Q8_0 tensor, decoded, with the original weights;
+   and compares each quantized tensor, decoded, with the original weights. For
+   Q4_0 it also compares the stored bytes with gguf-py's Q4_0 quantizer, which
+   mirrors llama.cpp's reference;
 3. builds llama.cpp at the pinned release tag and loads the file with `llama-completion`
    to generate text;
 4. measures perplexity with `llama-perplexity` on the first WikiText-2 test
    windows, and on the same windows evaluates the original model and the model
-   with the decoded Q8_0 weights, so the runtime's number can be checked against
+   with the decoded weights, so the runtime's number can be checked against
    a Python evaluation of the same file.
 
 Run with::
 
-    python -m modal run tools/gguf/modal_llama_verify.py::main
+    python -m modal run tools/gguf/modal_llama_verify.py::main --format-id gguf-q4_0
+
+The default is `gguf-q8_0`. `reference_quotes` prints the llama.cpp and gguf-py
+definitions the Q4_0 rule is taken from.
 """
 
 import hashlib
@@ -106,8 +111,11 @@ def _hf_name(gguf_name: str):
     return f"model.layers.{layer}.{mapped}" if mapped else None
 
 
+FORMATS = ("gguf-q8_0", "gguf-q4_0")
+
+
 @app.function(image=image, gpu="L4", cpu=8, memory=49152, timeout=10800)
-def verify() -> dict:
+def verify(format_id: str = "gguf-q8_0") -> dict:
     import math
     import sys
 
@@ -123,19 +131,25 @@ def verify() -> dict:
     sys.path.insert(0, "/root/transformer_engine_nvfp4")
     import quality_eval as qe
 
+    if format_id not in FORMATS:
+        raise ValueError(f"{format_id} is not one of {FORMATS}")
+    wanted = {"gguf-q8_0": gguf.GGMLQuantizationType.Q8_0, "gguf-q4_0": gguf.GGMLQuantizationType.Q4_0}[format_id]
+    tag = format_id.removeprefix("gguf-")
+
     started = time.time()
     scratch = pathlib.Path("/tmp/gguf")
     scratch.mkdir(parents=True, exist_ok=True)
     result: dict = {"model": {"id": MODEL, "revision": MODEL_REVISION},
-                    "llama_cpp": {"tag": LLAMA_TAG, "commit": LLAMA_COMMIT}}
+                    "llama_cpp": {"tag": LLAMA_TAG, "commit": LLAMA_COMMIT},
+                    "format": format_id}
 
     # --- 1. export with the CLI ----------------------------------------------------------
     build = _run(["cargo", "build", "--release", "--bin", "modelq"], cwd="/repo")
     if build.returncode != 0:
         raise RuntimeError("cargo build failed:\n" + build.stderr[-4000:])
-    gguf_path = scratch / "qwen2.5-0.5b-q8_0.gguf"
+    gguf_path = scratch / f"qwen2.5-0.5b-{tag}.gguf"
     export = _run([
-        "/repo/target/release/modelq", "quantize", f"hf:{MODEL}", "--format", "gguf-q8_0",
+        "/repo/target/release/modelq", "quantize", f"hf:{MODEL}", "--format", format_id,
         "--revision", MODEL_REVISION, "--cache-dir", str(scratch / "cache"), "--output", str(gguf_path),
     ])
     result["export"] = {"exit_code": export.returncode, "stdout": export.stdout[-3000:],
@@ -165,32 +179,55 @@ def verify() -> dict:
             if hf_name is None:
                 raise RuntimeError(f"tensor {tensor.name} has no Hugging Face name")
             reference = source.get_tensor(hf_name).to(torch.float32).numpy()
-            if tensor.tensor_type == gguf.GGMLQuantizationType.Q8_0:
-                decoded = gguf.quants.dequantize(tensor.data, gguf.GGMLQuantizationType.Q8_0)
+            if tensor.tensor_type == wanted:
+                decoded = gguf.quants.dequantize(tensor.data, wanted)
             else:
                 decoded = np.asarray(tensor.data, dtype=np.float32)
             decoded = decoded.reshape(reference.shape)
             difference = float(np.abs(decoded - reference).max())
-            # Q8_0 stores each block scale as binary16, so the reconstruction error is at most
-            # 0.5 d + 127 * |d16 - d|, with |d16 - d| <= d * 2**-11. With d <= max|w| / 127 this is
-            # the bound below; the plain half-step bound is too strict and was wrong (ADR 0032).
-            scale_bound = (0.5 + 127 * 2.0**-11) * float(np.abs(reference).max()) / 127 if tensor.tensor_type == gguf.GGMLQuantizationType.Q8_0 else 0.0
-            comparisons[tensor.name] = {
+            entry = {
                 "type": tensor.tensor_type.name,
                 "shape_gguf": [int(d) for d in tensor.shape],
                 "shape_hf": list(reference.shape),
                 "max_abs_difference": difference,
-                "half_scale_bound": scale_bound,
             }
             if tensor.tensor_type == gguf.GGMLQuantizationType.F32:
                 if difference != 0.0:
                     raise RuntimeError(f"{tensor.name} (F32) differs from the source")
-            else:
+            elif tensor.tensor_type == gguf.GGMLQuantizationType.Q8_0:
+                # Q8_0 stores each block scale as binary16, so the reconstruction error is at most
+                # 0.5 d + 127 * |d16 - d|, with |d16 - d| <= d * 2**-11. With d <= max|w| / 127 this is
+                # the bound below; the plain half-step bound is too strict and was wrong (ADR 0032).
+                scale_bound = (0.5 + 127 * 2.0**-11) * float(np.abs(reference).max()) / 127
+                entry["half_scale_bound"] = scale_bound
                 if difference > scale_bound * (1 + 1e-5) + 1e-7:
                     raise RuntimeError(f"{tensor.name} exceeds half a Q8_0 scale: {difference} > {scale_bound}")
+            elif tensor.tensor_type == gguf.GGMLQuantizationType.Q4_0:
+                # Q4_0 codes span -8..7 steps of d = max|block| / 8 (llama.cpp's reference). The codes
+                # reach one full step at the negative extreme, and the binary16 scale adds 8 * 2**-11 of
+                # a step, so every block satisfies |error| <= (1 + 2**-8) * max|block| / 8 (ADR 0033).
+                # The bound is checked block by block, not only per tensor.
+                block_error = np.abs(decoded - reference).reshape(-1, 32).max(axis=1)
+                block_bound = (1 + 2.0**-8) * np.abs(reference).reshape(-1, 32).max(axis=1) / 8
+                if np.any(block_error > block_bound * (1 + 1e-5) + 1e-7):
+                    raise RuntimeError(f"{tensor.name} has a block above the Q4_0 bound")
+                entry["worst_block_ratio"] = float(np.max(block_error / np.maximum(block_bound, 1e-30)))
+                # gguf-py's Q4_0 quantizer mirrors llama.cpp's reference; the stored bytes should match it.
+                ours = np.asarray(tensor.data).reshape(-1, 18)
+                theirs = gguf.quants.quantize(reference, gguf.GGMLQuantizationType.Q4_0).reshape(-1, 18)
+                entry["blocks"] = int(ours.shape[0])
+                entry["blocks_differing_from_gguf_py"] = int(np.any(ours != theirs, axis=1).sum())
+            else:
+                raise RuntimeError(f"{tensor.name} has an unexpected type {tensor.tensor_type.name}")
+            comparisons[tensor.name] = entry
             worst_error = max(worst_error, difference)
-    result["gguf_tensors"] = {"checked": len(comparisons), "worst_abs_error": worst_error,
-                              "by_name": {k: comparisons[k] for k in list(comparisons)[:8]}}
+    result["gguf_tensors"] = {
+        "checked": len(comparisons),
+        "worst_abs_error": worst_error,
+        "blocks": sum(c.get("blocks", 0) for c in comparisons.values()),
+        "blocks_differing_from_gguf_py": sum(c.get("blocks_differing_from_gguf_py", 0) for c in comparisons.values()),
+        "by_name": {k: comparisons[k] for k in list(comparisons)[:8]},
+    }
 
     # --- 3. llama.cpp at the pinned tag ---------------------------------------------------
     llama_source = scratch / "llama.cpp"
@@ -245,8 +282,8 @@ def verify() -> dict:
         loaded = 0
         for tensor in reader.tensors:
             hf_name = _hf_name(tensor.name)
-            if tensor.tensor_type == gguf.GGMLQuantizationType.Q8_0:
-                values = gguf.quants.dequantize(tensor.data, gguf.GGMLQuantizationType.Q8_0)
+            if tensor.tensor_type == wanted:
+                values = gguf.quants.dequantize(tensor.data, wanted)
             else:
                 values = np.asarray(tensor.data, dtype=np.float32)
             parameter = parameters.get(hf_name)
@@ -294,11 +331,11 @@ def verify() -> dict:
 
 
 @app.local_entrypoint()
-def main() -> None:
-    result = verify.remote()
+def main(format_id: str = "gguf-q8_0") -> None:
+    result = verify.remote(format_id)
     results = REPO / "modal_results"
     results.mkdir(exist_ok=True)
-    path = results / "gguf-llama-verify.json"
+    path = results / f"gguf-llama-verify-{format_id.removeprefix('gguf-')}.json"
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({k: result[k] for k in ("export", "gguf_reader", "gguf_tensors")}, indent=2)[:3000])
     print("generation:", result["generation"]["stdout"][:400])
@@ -385,3 +422,53 @@ def tokenizer() -> None:
     results.mkdir(exist_ok=True)
     (results / "gguf-tokenizer-check.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({k: v for k, v in result.items() if k != "stderr_head"}, indent=2)[:4000])
+
+
+@app.function(image=image, cpu=2, memory=8192, timeout=900)
+def reference() -> dict:
+    """Quotes the pinned llama.cpp's Q4_0 definitions and the gguf-py Q4_0 quantizer (ADR 0033)."""
+    import inspect
+    import urllib.request
+
+    import gguf
+
+    scratch = pathlib.Path("/tmp/gguf-reference")
+    scratch.mkdir(parents=True, exist_ok=True)
+    archive = scratch / "llama.tar.gz"
+    with urllib.request.urlopen(f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_COMMIT}.tar.gz") as response:
+        archive.write_bytes(response.read())
+    _run(["tar", "-xzf", str(archive), "-C", str(scratch)])
+    root = next(p for p in scratch.iterdir() if p.is_dir() and p.name.startswith("llama.cpp"))
+
+    def windows(filename: str, pattern: str, before: int = 0, after: int = 20, limit: int = 4) -> str:
+        found = []
+        for path in sorted(root.rglob(filename)):
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+            for index, line in enumerate(lines):
+                if re.search(pattern, line):
+                    body = "\n".join(lines[max(0, index - before): index + after])
+                    found.append(f"{path.relative_to(root)}:{index + 1}\n{body}")
+                    if len(found) >= limit:
+                        return "\n---\n".join(found)
+        return "\n---\n".join(found) or "not found"
+
+    return {
+        "gguf_py_version": getattr(gguf, "__version__", None),
+        "block_q4_0": windows("ggml-common.h", r"\} block_q4_0;", before=6, after=1, limit=1),
+        "ggml_type_q4_0": windows("ggml.h", r"GGML_TYPE_Q4_0\s*=", after=1, limit=1),
+        "ftype_q4_0": windows("llama.h", r"LLAMA_FTYPE_MOSTLY_Q4_0\s*=", after=1, limit=1),
+        "llama_quant_2d_rule": windows("llama-quant.cpp", r"quantize only 2D tensors", before=3, after=8, limit=1),
+        "llama_quant_q4_0_mentions": windows("llama-quant.cpp", r"MOSTLY_Q4_0|quantize_output_tensor", before=2, after=4, limit=6),
+        "convert_q4_0_policy": windows("convert_hf_to_gguf.py", r"MOSTLY_Q4_0|n_dims <= 1|can_quantize", before=3, after=10, limit=6),
+        "gguf_py_q4_0": inspect.getsource(gguf.quants.Q4_0),
+    }
+
+
+@app.local_entrypoint()
+def reference_quotes() -> None:
+    result = reference.remote()
+    results = REPO / "modal_results"
+    results.mkdir(exist_ok=True)
+    (results / "gguf-reference-quotes.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    for key, value in result.items():
+        print(f"== {key}\n{value}\n")

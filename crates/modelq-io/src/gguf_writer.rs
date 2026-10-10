@@ -31,6 +31,8 @@ const TYPE_ARRAY: u32 = 9;
 
 /// The GGML tensor types this writer can emit.
 pub const GGML_TYPE_F32: u32 = 0;
+/// The GGML Q4_0 type: 32-value blocks of one F16 scale and 32 packed four-bit codes.
+pub const GGML_TYPE_Q4_0: u32 = 2;
 /// The GGML Q8_0 type: 32-value blocks of one F16 scale and 32 signed bytes.
 pub const GGML_TYPE_Q8_0: u32 = 8;
 

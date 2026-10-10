@@ -1,5 +1,5 @@
-//! Exports a Qwen2 checkpoint as a runtime-compatible GGUF file with Q8_0 weights
-//! (ADR 0032, milestone M5).
+//! Exports a Qwen2 checkpoint as a runtime-compatible GGUF file with Q8_0 or
+//! Q4_0 weights (ADR 0032 and ADR 0033, milestone M5).
 //!
 //! The mapping follows llama.cpp's `qwen2` architecture, as its loader reads it
 //! (tensor names, hyperparameter keys, and the `gpt2` byte-level BPE tokenizer
@@ -7,21 +7,23 @@
 //! export fails: nothing is dropped silently, and the architecture is refused
 //! unless `config.json` says `qwen2`.
 //!
-//! Two-dimensional weights become Q8_0 (ADR 0008's block layout), and one-
-//! dimensional norms and biases stay F32, as llama.cpp's own Q8_0 conversion
-//! does. Those are the only two representations written.
+//! Two-dimensional weights become the chosen block format (ADR 0008's Q8_0 or
+//! ADR 0033's Q4_0), and one-dimensional norms and biases stay F32, as
+//! llama.cpp's own quantized conversions do. Those are the only two
+//! representations written.
 
 use std::{
     fmt,
     path::{Path, PathBuf},
 };
 
-use modelq_quant::gguf_q8_0;
+use modelq_quant::{gguf_q4_0, gguf_q8_0};
 use serde_json::Value;
 
 use crate::{
     gguf_writer::{
-        GGML_TYPE_F32, GGML_TYPE_Q8_0, GgufFile, GgufWriteError, MetadataValue, TensorRecord,
+        GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GgufFile, GgufWriteError, MetadataValue,
+        TensorRecord,
     },
     safetensors::{SafetensorsError, TensorSource},
     sharded::{SafetensorsInput, ShardedError},
@@ -31,8 +33,48 @@ use crate::{
 pub const ARCHITECTURE: &str = "qwen2";
 /// `general.file_type` for an all-Q8_0 file with F32 norms (llama.cpp's `MOSTLY_Q8_0`).
 pub const FILE_TYPE_MOSTLY_Q8_0: u32 = 7;
+/// `general.file_type` for an all-Q4_0 file with F32 norms (llama.cpp's `MOSTLY_Q4_0`).
+pub const FILE_TYPE_MOSTLY_Q4_0: u32 = 2;
 /// `general.quantization_version` written by the GGML library at the pinned release.
 pub const QUANTIZATION_VERSION: u32 = 2;
+
+/// The block format of the two-dimensional weights. One-dimensional tensors are always F32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightQuantization {
+    /// 8-bit blocks with one binary16 scale per 32 values (ADR 0008, ADR 0032).
+    Q8_0,
+    /// 4-bit blocks with one binary16 scale per 32 values (ADR 0033).
+    Q4_0,
+}
+
+impl WeightQuantization {
+    /// `general.file_type` for a file of this format with F32 norms.
+    pub const fn file_type(self) -> u32 {
+        match self {
+            Self::Q8_0 => FILE_TYPE_MOSTLY_Q8_0,
+            Self::Q4_0 => FILE_TYPE_MOSTLY_Q4_0,
+        }
+    }
+
+    const fn ggml_type(self) -> u32 {
+        match self {
+            Self::Q8_0 => GGML_TYPE_Q8_0,
+            Self::Q4_0 => GGML_TYPE_Q4_0,
+        }
+    }
+
+    /// Quantizes one tensor's values into the serialized block bytes.
+    fn quantize(self, values: &[f32], shape: &[usize]) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Q8_0 => gguf_q8_0::quantize_shaped(values, shape)
+                .map(gguf_q8_0::QuantizedQ8_0::into_bytes)
+                .map_err(|error| error.to_string()),
+            Self::Q4_0 => gguf_q4_0::quantize_shaped(values, shape)
+                .map(gguf_q4_0::QuantizedQ4_0::into_bytes)
+                .map_err(|error| error.to_string()),
+        }
+    }
+}
 
 const TOKEN_NORMAL: i32 = 1;
 const TOKEN_CONTROL: i32 = 3;
@@ -130,8 +172,8 @@ impl From<SafetensorsError> for Qwen2ExportError {
 /// Summary of one export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportReport {
-    /// Tensors written as Q8_0.
-    pub q8_0_tensors: usize,
+    /// Two-dimensional tensors written in the chosen block format.
+    pub quantized_tensors: usize,
     /// Tensors written as F32.
     pub f32_tensors: usize,
     /// Metadata entries written.
@@ -451,14 +493,16 @@ fn required_names(hyper: &Hyperparameters) -> Vec<String> {
     names
 }
 
-/// Exports the checkpoint in `model_dir` as a Q8_0 GGUF file at `output`.
+/// Exports the checkpoint in `model_dir` as a GGUF file at `output`, with its
+/// two-dimensional weights in `quantization`.
 ///
 /// `model_dir` holds `config.json`, `tokenizer.json`, `tokenizer_config.json`,
 /// and the SafeTensors weights (one file, or an index with its shards). The
 /// output is created new; an existing file is refused.
-pub fn export_qwen2_q8_0(
+pub fn export_qwen2(
     model_dir: &Path,
     output: &Path,
+    quantization: WeightQuantization,
 ) -> Result<ExportReport, Qwen2ExportError> {
     let config = read_json(&model_dir.join("config.json"), "config.json")?;
     let hyper = hyperparameters(&config)?;
@@ -497,7 +541,7 @@ pub fn export_qwen2_q8_0(
     )?;
     metadata(
         "general.file_type",
-        MetadataValue::U32(FILE_TYPE_MOSTLY_Q8_0),
+        MetadataValue::U32(quantization.file_type()),
     )?;
     metadata(
         "general.quantization_version",
@@ -556,7 +600,7 @@ pub fn export_qwen2_q8_0(
     )?;
     let metadata_entries = file.metadata().len();
 
-    let mut q8_0_tensors = 0;
+    let mut quantized_tensors = 0;
     let mut f32_tensors = 0;
     for (gguf, source_name, shape) in &mapped {
         let values: Vec<f32> = source.with_tensor(source_name, |view| view.values().collect())?;
@@ -566,14 +610,14 @@ pub fn export_qwen2_q8_0(
             .map(|&dimension| u64::try_from(dimension).unwrap_or(u64::MAX))
             .collect();
         let (ggml_type, data) = if shape.len() == 2 {
-            let quantized = gguf_q8_0::quantize_shaped(&values, shape).map_err(|error| {
+            let quantized = quantization.quantize(&values, shape).map_err(|detail| {
                 Qwen2ExportError::Quantize {
                     name: source_name.clone(),
-                    detail: error.to_string(),
+                    detail,
                 }
             })?;
-            q8_0_tensors += 1;
-            (GGML_TYPE_Q8_0, quantized.into_bytes())
+            quantized_tensors += 1;
+            (quantization.ggml_type(), quantized)
         } else if shape.len() == 1 {
             f32_tensors += 1;
             (
@@ -605,7 +649,7 @@ pub fn export_qwen2_q8_0(
             detail: error.to_string(),
         })?;
     Ok(ExportReport {
-        q8_0_tensors,
+        quantized_tensors,
         f32_tensors,
         metadata_entries,
         vocab_size: hyper.vocab_size,

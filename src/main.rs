@@ -10,6 +10,7 @@ use clap::{Arg, ArgMatches, Command, value_parser};
 use modelq::{
     backend::{cpu::ParallelConfig, int8 as parallel_int8},
     io::{
+        gguf_qwen2::WeightQuantization,
         layout::{OutputTensorRole, plan_output_layout},
         safetensors::{Inspection, TensorSource, TensorSummary, inspect_file},
         sharded::SafetensorsInput,
@@ -392,36 +393,43 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
             }
             run_quantize(matches).map(|report| print_quantize_report(&report))
         }
-        "gguf-q8_0" => {
+        "gguf-q8_0" | "gguf-q4_0" => {
             if has_nvfp4_options || has_group_size || matches.contains_id("max-shard-size") {
-                return Err(
-                    "--exclude, --no-default-excludes, --scale-search, --group-size and --max-shard-size do not apply to gguf-q8_0"
-                        .to_owned(),
-                );
+                return Err(format!(
+                    "--exclude, --no-default-excludes, --scale-search, --group-size and --max-shard-size do not apply to {format}"
+                ));
             }
+            let quantization = if format.as_str() == "gguf-q4_0" {
+                WeightQuantization::Q4_0
+            } else {
+                WeightQuantization::Q8_0
+            };
             let (model, output) = quantize_paths(matches)?;
             require_cpu(matches)?;
             let input = resolve_model_input_with(matches, model, GGUF_EXTRAS)?;
             if !input.is_dir() {
                 return Err(format!(
-                    "gguf-q8_0 needs a model directory with config.json, tokenizer.json, tokenizer_config.json and the weights; {} is not one",
+                    "{format} needs a model directory with config.json, tokenizer.json, tokenizer_config.json and the weights; {} is not one",
                     input.display()
                 ));
             }
-            let report = modelq::io::gguf_qwen2::export_qwen2_q8_0(&input, &output)
+            let report = modelq::io::gguf_qwen2::export_qwen2(&input, &output, quantization)
                 .map_err(|error| error.to_string())?;
-            println!("Format: gguf-q8_0 (GGUF v3, qwen2 architecture, Q8_0 weights)");
+            println!("Format: {format} (GGUF v3, qwen2 architecture, {quantization:?} weights)");
             println!(
                 "Written: {} ({} bytes)",
                 output.display(),
                 report.output_bytes
             );
             println!(
-                "Tensors: {} Q8_0, {} F32; metadata entries: {}; vocabulary: {}",
-                report.q8_0_tensors, report.f32_tensors, report.metadata_entries, report.vocab_size
+                "Tensors: {} {quantization:?}, {} F32; metadata entries: {}; vocabulary: {}",
+                report.quantized_tensors,
+                report.f32_tensors,
+                report.metadata_entries,
+                report.vocab_size
             );
             println!(
-                "Compatibility: see `modelq formats` for the verified runtime status (ADR 0032)"
+                "Compatibility: see `modelq formats` for the verified runtime status (ADR 0032, ADR 0033)"
             );
             Ok(())
         }
