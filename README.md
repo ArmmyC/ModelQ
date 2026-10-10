@@ -32,8 +32,9 @@ is currently compatibility Level 2 (container-valid) only; it is not a
 general GGUF reader and does not claim that the fixture is a runnable model.
 The exact layout, pinned llama.cpp reference, and external `llama-gguf`
 validation command are documented in
-[ADR 0008](docs/adr/0008-gguf-q8-0-compatibility-spike.md). Quantization is
-still not exposed as a general GGUF model conversion command.
+[ADR 0008](docs/adr/0008-gguf-q8-0-compatibility-spike.md). GGUF export is now
+available for Qwen2 models: `modelq quantize --format gguf-q8_0` and
+`--format gguf-q4_0` (ADRs 0032 to 0034).
 
 Task 19 adds reference element codecs for FP4 E2M1, FP8 E4M3, and FP8 E5M2.
 They use documented nearest-even rounding and satfinite behavior with
