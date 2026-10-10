@@ -99,3 +99,7 @@ The first measurement had both defects. The final run (reported here) has neithe
 - A user runs AWQ as two commands today: the calibration script, then `modelq quantize --format int4`. Wiring it into `modelq quantize` behind a `--calibration awq` flag is a follow-up; it needs the Python sidecar to be packaged with the binary (M6), as the evaluation already does.
 - The rescaled checkpoint stores the transformed tensors as F32 and the rest unchanged; the output stores the same bytes as the data-free path for the untransformed tensors.
 - Any later calibration method (GPTQ) is measured against this ADR's numbers, on the same windows and the same policy variants.
+
+## Follow-up
+
+- `modelq quantize --format int4 --calibration awq` runs this method as an opt-in, and its output reproduces the result above exactly. See [ADR 0037](0037-awq-quantize.md).

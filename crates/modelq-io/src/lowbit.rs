@@ -78,6 +78,21 @@ pub fn write_lowbit_safetensors(
     config: LowBitConfig,
     destination: impl AsRef<Path>,
 ) -> Result<(), WriterError> {
+    write_lowbit_safetensors_with(source, plan, decisions, config, destination, &[])
+}
+
+/// Like [`write_lowbit_safetensors`], and also records `extra` in the file's metadata.
+///
+/// ModelQ passes only the provenance keys `modelq.transform` and `modelq.calibration`
+/// (ADR 0037). They are informational; the decoder does not read them.
+pub fn write_lowbit_safetensors_with(
+    source: &impl TensorSource,
+    plan: &OutputLayoutPlan,
+    decisions: &[TensorDecision],
+    config: LowBitConfig,
+    destination: impl AsRef<Path>,
+    extra: &[(&str, String)],
+) -> Result<(), WriterError> {
     config.validate().map_err(|error| WriterError::Encoding {
         name: String::new(),
         detail: error.to_string(),
@@ -108,7 +123,7 @@ pub fn write_lowbit_safetensors(
     }
 
     let manifest = build_manifest(&summaries, decisions, plan, &config)?;
-    let header = build_header(plan, &config, &manifest)?;
+    let header = build_header(plan, &config, &manifest, extra)?;
 
     let (temporary_path, mut file) = create_temporary_file(&destination)?;
     let mut temporary = TemporaryOutput::new(temporary_path.clone());
@@ -238,10 +253,14 @@ fn build_header(
     plan: &OutputLayoutPlan,
     config: &LowBitConfig,
     manifest: &str,
+    extra: &[(&str, String)],
 ) -> Result<Vec<u8>, WriterError> {
     let mut metadata = Map::new();
     for (key, value) in metadata_entries(config, manifest) {
         metadata.insert(key, Value::String(value));
+    }
+    for (key, value) in extra {
+        metadata.insert((*key).to_owned(), Value::String(value.clone()));
     }
     let mut header = Map::new();
     header.insert("__metadata__".to_owned(), Value::Object(metadata));
