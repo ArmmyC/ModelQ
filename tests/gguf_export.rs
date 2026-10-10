@@ -1,8 +1,8 @@
-//! Exporting a tiny Qwen2 checkpoint as a Q8_0 GGUF file (ADR 0032).
+//! Exporting a tiny Qwen2 checkpoint as a Q8_0 or Q4_0 GGUF file (ADR 0032, ADR 0033).
 //!
 //! The checkpoint is random, so the model is meaningless; the tests check the
 //! export's structure, its counts, and its refusals. Runtime compatibility is
-//! checked separately against llama.cpp on Linux (see ADR 0032).
+//! checked separately against llama.cpp on Linux (see ADR 0032 and ADR 0033).
 
 use std::{
     env, fs,
@@ -11,7 +11,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use modelq::io::gguf_qwen2::{Qwen2ExportError, export_qwen2_q8_0};
+use modelq::io::gguf_qwen2::{Qwen2ExportError, WeightQuantization, export_qwen2};
 use serde_json::{Map, Value, json};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -159,6 +159,37 @@ fn write_model(directory: &Path, model_type: &str, extra: &[&str]) {
     .unwrap();
 }
 
+/// The value of a `u32` metadata entry, found by its key (GGUF type 4 is `U32`).
+fn u32_metadata(bytes: &[u8], key: &str) -> Option<u32> {
+    let mut record = (key.len() as u64).to_le_bytes().to_vec();
+    record.extend_from_slice(key.as_bytes());
+    let at = bytes
+        .windows(record.len())
+        .position(|window| window == record.as_slice())?
+        + record.len();
+    if bytes.get(at..at + 4)? != 4_u32.to_le_bytes() {
+        return None;
+    }
+    Some(u32::from_le_bytes(
+        bytes.get(at + 4..at + 8)?.try_into().ok()?,
+    ))
+}
+
+/// The ggml type of a tensor, read from its tensor-info record.
+fn tensor_type(bytes: &[u8], name: &str) -> Option<u32> {
+    let mut record = (name.len() as u64).to_le_bytes().to_vec();
+    record.extend_from_slice(name.as_bytes());
+    let at = bytes
+        .windows(record.len())
+        .position(|window| window == record.as_slice())?
+        + record.len();
+    let dimensions = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+    let type_at = at + 4 + 8 * dimensions;
+    Some(u32::from_le_bytes(
+        bytes.get(type_at..type_at + 4)?.try_into().ok()?,
+    ))
+}
+
 #[test]
 fn a_tiny_qwen2_checkpoint_exports_to_a_q8_0_gguf_file() {
     let dir = TestDir::new("export");
@@ -167,10 +198,11 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q8_0_gguf_file() {
     write_model(&model, "qwen2", &[]);
     let output = dir.join("tiny.gguf");
 
-    let report = export_qwen2_q8_0(&model, &output).expect("the tiny checkpoint exports");
+    let report = export_qwen2(&model, &output, WeightQuantization::Q8_0)
+        .expect("the tiny checkpoint exports");
     // Q8_0: the embedding and seven matrices per layer. F32: the final norm, and
     // two norms and three biases per layer.
-    assert_eq!(report.q8_0_tensors, 1 + 7 * LAYERS);
+    assert_eq!(report.quantized_tensors, 1 + 7 * LAYERS);
     assert_eq!(report.f32_tensors, 1 + 5 * LAYERS);
     assert_eq!(report.vocab_size, VOCAB);
     let bytes = fs::read(&output).unwrap();
@@ -180,6 +212,8 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q8_0_gguf_file() {
         3,
         "GGUF version 3"
     );
+    assert_eq!(u32_metadata(&bytes, "general.file_type"), Some(7));
+    assert_eq!(tensor_type(&bytes, "token_embd.weight"), Some(8), "Q8_0");
     assert_eq!(report.output_bytes, bytes.len() as u64);
     assert_eq!(bytes.len() % 32, 0, "the file ends on the alignment");
     assert!(
@@ -188,6 +222,36 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q8_0_gguf_file() {
             .any(|window| window == b"qwen2"),
         "the architecture name is written"
     );
+}
+
+#[test]
+fn a_tiny_qwen2_checkpoint_exports_to_a_q4_0_gguf_file() {
+    let dir = TestDir::new("export-q4");
+    let model = dir.join("model");
+    fs::create_dir_all(&model).unwrap();
+    write_model(&model, "qwen2", &[]);
+    let output = dir.join("tiny-q4.gguf");
+
+    let report = export_qwen2(&model, &output, WeightQuantization::Q4_0)
+        .expect("the tiny checkpoint exports");
+    assert_eq!(report.quantized_tensors, 1 + 7 * LAYERS);
+    assert_eq!(report.f32_tensors, 1 + 5 * LAYERS);
+    let bytes = fs::read(&output).unwrap();
+    assert_eq!(&bytes[..4], b"GGUF");
+    assert_eq!(u32_metadata(&bytes, "general.file_type"), Some(2));
+    assert_eq!(tensor_type(&bytes, "token_embd.weight"), Some(2), "Q4_0");
+    assert_eq!(tensor_type(&bytes, "blk.1.attn_q.weight"), Some(2), "Q4_0");
+    assert_eq!(
+        tensor_type(&bytes, "blk.1.attn_norm.weight"),
+        Some(0),
+        "F32"
+    );
+    assert_eq!(tensor_type(&bytes, "output_norm.weight"), Some(0), "F32");
+
+    // The same checkpoint in Q8_0 is larger: each block is 34 bytes instead of 18.
+    let eight_bit = dir.join("tiny-q8.gguf");
+    export_qwen2(&model, &eight_bit, WeightQuantization::Q8_0).unwrap();
+    assert!(report.output_bytes < fs::metadata(&eight_bit).unwrap().len());
 }
 
 #[test]
@@ -200,7 +264,7 @@ fn a_tensor_without_a_qwen2_name_is_refused_not_dropped() {
         "qwen2",
         &["model.layers.0.self_attn.rotary_emb.inv_freq"],
     );
-    let error = export_qwen2_q8_0(&model, &dir.join("out.gguf")).unwrap_err();
+    let error = export_qwen2(&model, &dir.join("out.gguf"), WeightQuantization::Q8_0).unwrap_err();
     assert!(
         matches!(error, Qwen2ExportError::UnmappedTensor { ref name } if name.contains("rotary")),
         "{error}"
@@ -217,7 +281,7 @@ fn other_architectures_are_refused() {
     let model = dir.join("model");
     fs::create_dir_all(&model).unwrap();
     write_model(&model, "llama", &[]);
-    let error = export_qwen2_q8_0(&model, &dir.join("out.gguf")).unwrap_err();
+    let error = export_qwen2(&model, &dir.join("out.gguf"), WeightQuantization::Q4_0).unwrap_err();
     assert!(
         matches!(error, Qwen2ExportError::UnsupportedArchitecture { .. }),
         "{error}"
@@ -232,7 +296,7 @@ fn an_existing_output_is_never_replaced() {
     write_model(&model, "qwen2", &[]);
     let output = dir.join("out.gguf");
     fs::write(&output, b"previous artifact").unwrap();
-    let error = export_qwen2_q8_0(&model, &output).unwrap_err();
+    let error = export_qwen2(&model, &output, WeightQuantization::Q8_0).unwrap_err();
     assert!(matches!(error, Qwen2ExportError::Write(_)), "{error}");
     assert_eq!(fs::read(&output).unwrap(), b"previous artifact");
 }
@@ -245,7 +309,7 @@ fn the_export_is_deterministic() {
     write_model(&model, "qwen2", &[]);
     let first = dir.join("first.gguf");
     let second = dir.join("second.gguf");
-    export_qwen2_q8_0(&model, &first).unwrap();
-    export_qwen2_q8_0(&model, &second).unwrap();
+    export_qwen2(&model, &first, WeightQuantization::Q8_0).unwrap();
+    export_qwen2(&model, &second, WeightQuantization::Q8_0).unwrap();
     assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
 }
