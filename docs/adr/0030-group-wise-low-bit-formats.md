@@ -62,7 +62,7 @@ Writing an experimental format without `--experimental` is refused before any fi
 
 - Users can write 4-bit group-wise files with one command, and can try 3, 2 and 1 bits deliberately.
 - The 4-bit output is bit-identical to the INT4 reference, so the earlier reference tests now protect the CLI path as well.
-- `modelq eval` reads only Transformer Engine containers, so **no quality is measured for these formats yet**. A low-bit output must not be relied on for quality until evaluation reads this format (a follow-up that ADR 0028 M1 will need).
+- `modelq eval` reads only Transformer Engine containers, so **no quality is measured for these formats yet**. A low-bit output must not be relied on for quality until evaluation reads this format (a follow-up that ADR 0028 M1 will need). Resolved by ADR 0035.
 - Encoding is sequential. Parallel encoding is a later optimization, measured separately (PROJECT.md section 25).
 - Group-wise scales are not calibrated: each group uses its own maximum (or mean absolute value), with no search. The scale search of ADR 0025 could be applied to these formats later, and would need its own evidence.
 
