@@ -128,6 +128,8 @@ fn run_eval_command(matches: &ArgMatches) -> Result<(), String> {
             .get_one::<String>("model")
             .cloned()
             .unwrap_or_default(),
+        revision: matches.get_one::<String>("revision").cloned(),
+        cache_dir: matches.get_one::<PathBuf>("cache-dir").cloned(),
         download: matches.get_flag("download"),
         dataset: matches.get_one::<PathBuf>("dataset").cloned(),
         containers: matches
@@ -281,7 +283,7 @@ fn build_cli() -> Command {
                         .long("model")
                         .value_name("MODEL")
                         .required(true)
-                        .help("a local model directory, or a pinned model id with --download"),
+                        .help("a local model directory, hf:owner/name (with --download), or a pinned model id with --download"),
                 )
                 .arg(
                     Arg::new("container")
@@ -290,7 +292,7 @@ fn build_cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .action(clap::ArgAction::Append)
                         .required(true)
-                        .help("a ModelQ NVFP4 Transformer Engine container; repeat to compare several"),
+                        .help("a ModelQ container in any format that quantize writes; repeat to compare several"),
                 )
                 .arg(
                     Arg::new("dataset")
@@ -303,7 +305,21 @@ fn build_cli() -> Command {
                     Arg::new("download")
                         .long("download")
                         .action(clap::ArgAction::SetTrue)
-                        .help("allow downloading the pinned model and dataset"),
+                        .help("allow downloading an hf: or pinned model, and the pinned WikiText-2 split when --dataset is absent"),
+                )
+                .arg(
+                    Arg::new("revision")
+                        .long("revision")
+                        .value_name("REVISION")
+                        .value_parser(value_parser!(String))
+                        .help("with hf:, the branch, tag or commit (a pinned model uses its pinned revision by default)"),
+                )
+                .arg(
+                    Arg::new("cache-dir")
+                        .long("cache-dir")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("with hf:, where downloads are cached (default: $MODELQ_CACHE, then the user cache)"),
                 )
                 .arg(
                     Arg::new("device")

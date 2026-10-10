@@ -1,22 +1,25 @@
-"""Local quality evaluation for ModelQ outputs (ADR 0028, milestone M1).
+"""Local quality evaluation for ModelQ outputs (ADR 0028, milestone M1; ADR 0035).
 
 Runs on the user's own machine, with no cloud service.  It compares an original
 causal language model with copies whose matrices were replaced by the values
-decoded from one or more ModelQ Transformer Engine NVFP4 containers, on
-WikiText-2, and writes a JSON report.  The metrics and the windowing are the
-same as the Modal evaluation that produced ADR 0024 and ADR 0026, so the
-numbers can be compared directly.
+decoded from one or more ModelQ containers, on WikiText-2, and writes a JSON
+report.  A container may be in any format that ``modelq quantize`` writes (see
+``modelq_containers.py``).  The metrics and the windowing are the same as the
+Modal evaluation that produced ADR 0024 and ADR 0026, so the numbers can be
+compared directly.
 
 Usage (from the repository root)::
 
     py -3 tools/quality_eval/modelq_eval.py \\
-        --model Qwen/Qwen2.5-0.5B --download \\
-        --container out/te.safetensors --report out/quality.json
+        --model ./Qwen2.5-0.5B --dataset ./wikitext-2-test.parquet \\
+        --container out/model.gguf --report out/quality.json
 
-Downloads happen only when ``--download`` is given, and then only for the
-pinned revisions below; each file's SHA-256 is checked against the Hub's
-metadata before it is used.  Without ``--download``, ``--model`` must be a
-local directory and ``--dataset`` a local Parquet file.
+``modelq eval --model hf:<owner>/<name>`` fetches the model and passes its
+directory here, with ``--model-id`` and ``--model-revision`` for the report.
+
+Downloads happen only when ``--download`` is given.  With it, a pinned model id
+may be given instead of a directory, and the pinned WikiText-2 split is fetched
+when ``--dataset`` is missing; each file's SHA-256 is checked before use.
 
 The output is a measurement, not a certification (see ``quality_eval.py``).
 """
@@ -33,6 +36,7 @@ from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import modelq_containers as mc  # noqa: E402  (path set above)
 import quality_eval as qe  # noqa: E402  (path set above)
 
 HF = "https://huggingface.co"
@@ -95,6 +99,11 @@ def _fetch_dataset() -> pathlib.Path:
     return path
 
 
+def _has_weights(directory: pathlib.Path) -> bool:
+    """A single-file or sharded SafeTensors checkpoint."""
+    return (directory / "model.safetensors").is_file() or (directory / "model.safetensors.index.json").is_file()
+
+
 def _resolve_device(torch: Any, requested: str) -> Any:
     if requested == "cpu":
         return torch.device("cpu")
@@ -131,11 +140,12 @@ def evaluate(
     variants: dict[str, Any] = {}
     for name, container in containers.items():
         quantized = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32).to(device)
-        substitution = qe.substitute_nvfp4_weights(quantized, container, torch)
+        kind, substitution = mc.substitute_container(quantized, container, torch)
         result = qe.evaluate_pair(base, quantized, windows, torch, device)
         result["relative_perplexity_increase"] = qe.relative_perplexity_increase(result)
         variants[name] = {
             "container": str(container),
+            "format": kind,
             "substitution": substitution.summary(),
             "result": result,
         }
@@ -174,9 +184,19 @@ def _print_table(report: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Evaluate ModelQ NVFP4 containers on WikiText-2 locally.")
-    parser.add_argument("--model", required=True, help="pinned model id (with --download) or a local directory")
-    parser.add_argument("--download", action="store_true", help="allow downloading the pinned model and dataset")
+    parser = argparse.ArgumentParser(description="Evaluate ModelQ outputs on WikiText-2 locally.")
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="a local model directory, or a pinned model id with --download",
+    )
+    parser.add_argument("--model-id", help="the model's name for the report (set when modelq eval fetched it)")
+    parser.add_argument("--model-revision", help="the model's revision for the report")
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="allow downloading a pinned model (given by id) and the pinned WikiText-2 split",
+    )
     parser.add_argument("--dataset", type=pathlib.Path, help="local WikiText-2 test Parquet file")
     parser.add_argument(
         "--container",
@@ -184,32 +204,42 @@ def main(argv: list[str] | None = None) -> int:
         type=pathlib.Path,
         required=True,
         metavar="PATH",
-        help="a ModelQ Transformer Engine NVFP4 container; repeat to compare several",
+        help="a ModelQ container in any format that quantize writes; repeat to compare several",
     )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--max-windows", type=int, default=None, help="score only the first N windows")
     parser.add_argument("--report", type=pathlib.Path, required=True, help="where to write the JSON report")
     args = parser.parse_args(argv)
 
-    if args.download:
-        if args.model not in PINNED_MODEL:
-            raise SystemExit(f"--download supports only the pinned models: {', '.join(PINNED_MODEL)}")
-        model_dir = _fetch_model(args.model, PINNED_MODEL[args.model])
-        dataset = args.dataset or _fetch_dataset()
-    else:
-        model_dir = pathlib.Path(args.model)
-        if not (model_dir / "model.safetensors").is_file():
-            raise SystemExit(f"{model_dir} is not a local model directory (no model.safetensors)")
-        if args.dataset is None:
-            raise SystemExit("without --download, pass --dataset with a local WikiText-2 test Parquet file")
-        dataset = args.dataset
     for container in args.container:
         if not container.is_file():
             raise SystemExit(f"container not found: {container}")
+    model_path = pathlib.Path(args.model)
+    if model_path.is_dir():
+        if not _has_weights(model_path):
+            raise SystemExit(f"{model_path} is not a local model directory (no model.safetensors)")
+        model_dir = model_path
+        model_id, model_revision = args.model_id or args.model, args.model_revision
+    elif args.download and args.model in PINNED_MODEL:
+        model_dir = _fetch_model(args.model, PINNED_MODEL[args.model])
+        model_id, model_revision = args.model, PINNED_MODEL[args.model]
+    elif args.download:
+        raise SystemExit(f"--download supports only the pinned models: {', '.join(PINNED_MODEL)}")
+    else:
+        raise SystemExit(
+            f"{args.model} is not a local model directory (no model.safetensors); "
+            "to download a pinned model, pass --download"
+        )
+    if args.dataset is not None:
+        dataset = args.dataset
+    elif args.download:
+        dataset = _fetch_dataset()
+    else:
+        raise SystemExit("without --download, pass --dataset with a local WikiText-2 test Parquet file")
 
     containers = {container.stem: container for container in args.container}
     report = evaluate(model_dir, containers, dataset, args.device, args.max_windows)
-    report["model"] = {"id": args.model, "revision": PINNED_MODEL.get(args.model)}
+    report["model"] = {"id": model_id, "revision": model_revision}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _print_table(report)

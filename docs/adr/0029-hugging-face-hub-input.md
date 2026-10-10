@@ -60,7 +60,7 @@ Only the files quantization needs are fetched: `model.safetensors`, or `model.sa
 ## Consequences
 
 - Users can run `modelq quantize hf:<model> --format nvfp4-te --output <file>` on their own machine with one command (Linux and macOS as the first targets; Windows once a signed build exists, see below).
-- The `eval` command still downloads through the Python tool (`--download`, pinned revisions, ADR 0028 M1). Making `eval` accept `hf:` is a follow-up.
+- The `eval` command still downloads through the Python tool (`--download`, pinned revisions, ADR 0028 M1). Making `eval` accept `hf:` is a follow-up. Resolved by ADR 0035.
 - Quantized outputs do not record which Hub commit they came from. The fetch prints the commit, and the cache keeps it on disk, but the output file has no provenance metadata yet. Adding it changes output bytes, so it needs its own decision.
 - Windows Application Control on the development PC blocks newly built executables, so the Windows acceptance run for this milestone cannot be done on that PC (see Verification).
 
@@ -75,5 +75,5 @@ The first real-Hub run failed, and the tests had not caught it. ureq's default T
 ## Not verified
 
 - The Windows acceptance criterion of ADR 0028 M2 ("a fresh Windows machine quantizes and evaluates a 0.5B model from one command") is not met. On the development PC, Windows Application Control blocks newly built executables, so the Windows build cannot be run there. The fix is a signed release (ADR 0028 section 7), not a change to the system's security setting.
-- "Evaluates from one command" is not met either: `modelq eval` takes a local model directory, so the evaluation is a second command that runs after the fetch. Making `eval` accept `hf:` is the follow-up noted under Consequences.
+- "Evaluates from one command" is not met either: `modelq eval` takes a local model directory, so the evaluation is a second command that runs after the fetch. Making `eval` accept `hf:` is the follow-up noted under Consequences. Resolved by ADR 0035.
 - Windows and macOS TLS (Schannel and Security.framework) are not exercised by any test yet.

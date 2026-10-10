@@ -1,0 +1,213 @@
+{
+  "milestone": "ADR 0035: modelq eval reads every container quantize writes, and fetches hf: models",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "llama_cpp_used": false,
+  "quantize": {
+    "int8": {
+      "exit_code": 0,
+      "bytes": 494232804
+    },
+    "int4": {
+      "exit_code": 0,
+      "bytes": 262701736
+    },
+    "nvfp4": {
+      "exit_code": 0,
+      "bytes": 473896544
+    },
+    "nvfp4-te": {
+      "exit_code": 0,
+      "bytes": 473840528
+    },
+    "gguf-q8_0": {
+      "exit_code": 0,
+      "bytes": 531064896
+    },
+    "gguf-q4_0": {
+      "exit_code": 0,
+      "bytes": 352151616
+    }
+  },
+  "eval": {
+    "command": "modelq eval --model hf:Qwen/Qwen2.5-0.5B --revision 060db6499f32faf8b98477b0a26969ef7d8b9987 --download --device cuda --container <each of the six containers> [--max-windows 20]",
+    "first_20_windows": {
+      "exit_code": 0,
+      "variants": {
+        "int8": {
+          "format": "int8",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.03989570501354143,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 13.287539081337224,
+          "relative_perplexity_increase": 0.0461781450628118,
+          "mean_kl_original_to_quantized": 0.04873659239201995,
+          "top1_agreement": 0.8817782120175867,
+          "windows": 20,
+          "positions": 40940
+        },
+        "int4": {
+          "format": "lowbit",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.13227516456821262,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 19.233717987859094,
+          "relative_perplexity_increase": 0.5143432718449358,
+          "mean_kl_original_to_quantized": 0.4212829953236992,
+          "top1_agreement": 0.6773815339521251,
+          "windows": 20,
+          "positions": 40940
+        },
+        "nvfp4": {
+          "format": "nvfp4",
+          "matrices_replaced": 168,
+          "relative_frobenius_error_mean": 0.08151244988576287,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 13.709766389649364,
+          "relative_perplexity_increase": 0.0794216959943214,
+          "mean_kl_original_to_quantized": 0.07805776591410449,
+          "top1_agreement": 0.8541035661944308,
+          "windows": 20,
+          "positions": 40940
+        },
+        "nvfp4-te": {
+          "format": "nvfp4-te",
+          "matrices_replaced": 168,
+          "relative_frobenius_error_mean": 0.08151244988576287,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 13.709766389649364,
+          "relative_perplexity_increase": 0.0794216959943214,
+          "mean_kl_original_to_quantized": 0.07805776591410449,
+          "top1_agreement": 0.8541035661944308,
+          "windows": 20,
+          "positions": 40940
+        },
+        "gguf-q8_0": {
+          "format": "gguf",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.005747114977738737,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 12.70804975818944,
+          "relative_perplexity_increase": 0.0005527616518271408,
+          "mean_kl_original_to_quantized": 0.0006938559857152063,
+          "top1_agreement": 0.9838055691255496,
+          "windows": 20,
+          "positions": 40940
+        },
+        "gguf-q4_0": {
+          "format": "gguf",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.09139271327101532,
+          "perplexity_original": 12.701029116355178,
+          "perplexity_quantized": 14.216804915771643,
+          "relative_perplexity_increase": 0.11934275447527265,
+          "mean_kl_original_to_quantized": 0.12205064677586483,
+          "top1_agreement": 0.8199560332193454,
+          "windows": 20,
+          "positions": 40940
+        }
+      }
+    },
+    "full_split": {
+      "exit_code": 0,
+      "variants": {
+        "int8": {
+          "format": "int8",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.03989570501354143,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 13.69025463273111,
+          "relative_perplexity_increase": 0.04746548646642899,
+          "mean_kl_original_to_quantized": 0.049539030457816824,
+          "top1_agreement": 0.879616679270031,
+          "windows": 146,
+          "positions": 298862
+        },
+        "int4": {
+          "format": "lowbit",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.13227516456821262,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 19.885816067878967,
+          "relative_perplexity_increase": 0.5214988004330049,
+          "mean_kl_original_to_quantized": 0.43186249642250524,
+          "top1_agreement": 0.6715273269937295,
+          "windows": 146,
+          "positions": 298862
+        },
+        "nvfp4": {
+          "format": "nvfp4",
+          "matrices_replaced": 168,
+          "relative_frobenius_error_mean": 0.08151244988576287,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 14.125070595627164,
+          "relative_perplexity_increase": 0.08073402137076661,
+          "mean_kl_original_to_quantized": 0.08026374103006145,
+          "top1_agreement": 0.8534273343549866,
+          "windows": 146,
+          "positions": 298862
+        },
+        "nvfp4-te": {
+          "format": "nvfp4-te",
+          "matrices_replaced": 168,
+          "relative_frobenius_error_mean": 0.08151244988576287,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 14.125070595627164,
+          "relative_perplexity_increase": 0.08073402137076661,
+          "mean_kl_original_to_quantized": 0.08026374103006145,
+          "top1_agreement": 0.8534273343549866,
+          "windows": 146,
+          "positions": 298862
+        },
+        "gguf-q8_0": {
+          "format": "gguf",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.005747114977738737,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 13.077367880560676,
+          "relative_perplexity_increase": 0.0005724419443664111,
+          "mean_kl_original_to_quantized": 0.000691640718987292,
+          "top1_agreement": 0.9846283569005093,
+          "windows": 146,
+          "positions": 298862
+        },
+        "gguf-q4_0": {
+          "format": "gguf",
+          "matrices_replaced": 169,
+          "relative_frobenius_error_mean": 0.09139271327101532,
+          "perplexity_original": 13.069886129532039,
+          "perplexity_quantized": 14.725778430189628,
+          "relative_perplexity_increase": 0.12669523546314765,
+          "mean_kl_original_to_quantized": 0.12334818225149406,
+          "top1_agreement": 0.8179628055758176,
+          "windows": 146,
+          "positions": 298862
+        }
+      }
+    }
+  },
+  "anchors": {
+    "adr_0031_data_free_int4_146_windows": {
+      "expected": 19.885816067878967,
+      "measured": 19.885816067878967
+    },
+    "adr_0032_gguf_q8_0_20_windows": {
+      "expected": 12.70804975818944,
+      "measured": 12.70804975818944
+    },
+    "adr_0034_gguf_q4_0_20_windows": {
+      "expected": 14.216804915771643,
+      "measured": 14.216804915771643
+    },
+    "original_20_windows": {
+      "expected": 12.701029116355178,
+      "measured": 12.701029116355178
+    }
+  },
+  "environment": {
+    "gpu": "NVIDIA L4 (Python and modelq eval)",
+    "modal_seconds": 1430.6
+  }
+}

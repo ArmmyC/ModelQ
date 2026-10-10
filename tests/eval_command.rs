@@ -306,3 +306,74 @@ fn a_failing_script_fails_the_command() {
         stderr(&output)
     );
 }
+
+#[test]
+fn a_hub_model_is_refused_without_download_before_anything_runs() {
+    let dir = TestDir::new("hub-no-download");
+    let container = dir.join("out.safetensors");
+    fs::write(&container, b"").unwrap();
+    let output = modelq()
+        .args(["eval", "--model", "hf:Qwen/Qwen2.5-0.5B", "--container"])
+        .arg(&container)
+        .args(["--report", "r.json"])
+        .env("MODELQ_PYTHON", "/nonexistent/python")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("pass --download"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn an_unpinned_hub_model_needs_a_revision() {
+    let dir = TestDir::new("hub-revision");
+    let container = dir.join("out.safetensors");
+    fs::write(&container, b"").unwrap();
+    let output = modelq()
+        .args([
+            "eval",
+            "--model",
+            "hf:someone/other-model",
+            "--download",
+            "--container",
+        ])
+        .arg(&container)
+        .args(["--report", "r.json"])
+        .env("MODELQ_PYTHON", "/nonexistent/python")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("--revision"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_revision_is_refused_for_a_local_model_directory() {
+    let dir = TestDir::new("local-revision");
+    let container = dir.join("out.safetensors");
+    fs::write(&container, b"").unwrap();
+    fs::write(dir.join("wikitext.parquet"), b"").unwrap();
+    let output = modelq()
+        .args(["eval", "--model"])
+        .arg(model_dir(&dir))
+        .args(["--revision", "main", "--dataset"])
+        .arg(dir.join("wikitext.parquet"))
+        .arg("--container")
+        .arg(&container)
+        .args(["--report", "r.json"])
+        .env("MODELQ_PYTHON", "/nonexistent/python")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("apply only to hf:"),
+        "{}",
+        stderr(&output)
+    );
+}

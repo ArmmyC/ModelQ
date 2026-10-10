@@ -222,8 +222,8 @@ modelq quantize ./model.safetensors --format int2 --experimental --output ./int2
 
 These files are ModelQ-native. No inference runtime reads them, and none is
 claimed. Their layout is specified in [ADR 0030](docs/adr/0030-group-wise-low-bit-formats.md).
-No quality measurement exists for them yet: `modelq eval` reads only
-Transformer Engine containers, so evaluate a low-bit output before relying on it.
+Measure their quality with `modelq eval` before relying on them; see
+[Evaluating a quantized output](#evaluating-a-quantized-output).
 
 ## Quantizing a Hugging Face model
 
@@ -245,24 +245,39 @@ starts a download. See [ADR 0029](docs/adr/0029-hugging-face-hub-input.md).
 
 ## Evaluating a quantized output
 
-`modelq eval` measures a ModelQ NVFP4 Transformer Engine container against the
-original model on WikiText-2: perplexity, KL divergence, top-1 agreement and
-weight error. It runs on your own machine. The measurement itself is Python
-(PyTorch, transformers, pyarrow, huggingface_hub), so install those first:
+`modelq eval` measures a ModelQ output against the original model on
+WikiText-2: perplexity, KL divergence, top-1 agreement and weight error. It
+reads every format that `modelq quantize` writes (INT8, the group-wise low-bit
+formats, NVFP4 in both layouts, and GGUF Q8_0 and Q4_0 for qwen2 models), and it
+runs on your own machine. The measurement itself is Python (PyTorch,
+transformers, pyarrow, huggingface_hub, safetensors and numpy), so install
+those first:
 
 ```bash
 py -3 -m pip install torch transformers pyarrow huggingface_hub numpy safetensors
-modelq eval --model ./Qwen2.5-0.5B --dataset ./wikitext-2-test.parquet   --container ./te.safetensors --report ./quality.json
+modelq eval --model hf:Qwen/Qwen2.5-0.5B --download --container ./int4.safetensors --container ./model.gguf --report ./quality.json
 ```
 
-Pass `--download` with a pinned model id (currently `Qwen/Qwen2.5-0.5B`) to
-let the script download the model and dataset, each verified against its
-SHA-256. Without `--download`, nothing is downloaded. The script is found in a
-source checkout, or at `MODELQ_EVAL_SCRIPT`; the interpreter is `--python`,
-then `MODELQ_PYTHON`, then `python`. A full run on CPU takes about an hour for
-Qwen2.5-0.5B; `--max-windows N` gives a quick check that is not comparable to
-full runs. Measurements are not certifications; see
-[ADR 0028](docs/adr/0028-open-source-quantizer-scope.md).
+`--model` takes a local model directory, or `hf:<owner>/<name>` with
+`--download`, which fetches the model with the same verified Hub client that
+`quantize` uses. The pinned revision of `Qwen/Qwen2.5-0.5B` is used unless you
+pass `--revision`; any other repository needs `--revision`. The format of each
+container is detected from the file. With a local directory, pass the
+WikiText-2 test Parquet file as `--dataset`:
+
+```bash
+modelq eval --model ./Qwen2.5-0.5B --dataset ./wikitext-2-test.parquet --container ./te.safetensors --report ./quality.json
+```
+
+Without `--download`, nothing is downloaded. `--download` also fetches the
+pinned WikiText-2 split when `--dataset` is missing, and every download is
+verified against its SHA-256. The script is found in a source checkout, or at
+`MODELQ_EVAL_SCRIPT`; the interpreter is `--python`, then `MODELQ_PYTHON`, then
+`python`. A full run on CPU takes about an hour for Qwen2.5-0.5B;
+`--max-windows N` gives a quick check that is not comparable to full runs.
+Measurements are not certifications; see
+[ADR 0028](docs/adr/0028-open-source-quantizer-scope.md) and
+[ADR 0035](docs/adr/0035-evaluating-every-output.md).
 
 ## Requirements
 
