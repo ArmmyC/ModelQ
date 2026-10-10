@@ -1,0 +1,78 @@
+{
+  "milestone": "M5 follow-up: where the Q4_0 quality cost comes from (ADR 0033), Qwen2.5-0.5B",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "method": "Python only (gguf-py quantizers, which write the same Q4_0 bytes as ModelQ's exporter). Each variant sets every two-dimensional weight to its original, Q4_0 or Q8_0 round-trip value. Norms and biases stay original. The windows and both perplexity rules are those of ADR 0032 and ADR 0033.",
+  "windows": 20,
+  "variants": {
+    "original": {
+      "embedding": "original",
+      "linear_layers": "original",
+      "perplexity_llama_rule": 11.304229573464996,
+      "increase_llama_rule": 0.0,
+      "perplexity_all_positions": 12.701029561333652,
+      "increase_all_positions": 0.0,
+      "embedding_bytes": 544538624,
+      "file_bytes_estimate": 752047168
+    },
+    "q4_0_all": {
+      "embedding": "q4_0",
+      "linear_layers": "q4_0",
+      "perplexity_llama_rule": 13.106253859095489,
+      "increase_llama_rule": 0.15941150822524675,
+      "perplexity_all_positions": 14.780485214200796,
+      "increase_all_positions": 0.1637233928812929,
+      "embedding_bytes": 76575744,
+      "file_bytes_estimate": 284084288
+    },
+    "embedding_q4_0_linear_original": {
+      "embedding": "q4_0",
+      "linear_layers": "original",
+      "perplexity_llama_rule": 11.71389616381065,
+      "increase_llama_rule": 0.03624011593919563,
+      "perplexity_all_positions": 13.163133633771084,
+      "increase_all_positions": 0.03638319792942113,
+      "embedding_bytes": 76575744,
+      "file_bytes_estimate": 284084288
+    },
+    "embedding_original_linear_q4_0": {
+      "embedding": "original",
+      "linear_layers": "q4_0",
+      "perplexity_llama_rule": 12.597033754545697,
+      "increase_llama_rule": 0.11436464313458106,
+      "perplexity_all_positions": 14.207740515851281,
+      "increase_all_positions": 0.11862904083812076,
+      "embedding_bytes": 544538624,
+      "file_bytes_estimate": 752047168
+    },
+    "embedding_q8_0_linear_q4_0": {
+      "embedding": "q8_0",
+      "linear_layers": "q4_0",
+      "perplexity_llama_rule": 12.604913106700563,
+      "increase_llama_rule": 0.11506167003974599,
+      "perplexity_all_positions": 14.216804693223732,
+      "increase_all_positions": 0.11934269773724693,
+      "embedding_bytes": 144643072,
+      "file_bytes_estimate": 352151616
+    }
+  },
+  "reproduces_adr_0033": {
+    "relative_difference": {
+      "original": {
+        "all_positions": 3.5034836118184366e-08,
+        "llama_rule": 0.0
+      },
+      "q4_0_all": {
+        "all_positions": 3.205314673639799e-08,
+        "llama_rule": 0.0
+      }
+    },
+    "note": "The original and all-Q4_0 numbers of ADR 0033 are reproduced to within 4e-8 relative."
+  },
+  "environment": {
+    "gpu": "NVIDIA L4 (Python)",
+    "modal_seconds": 81.3
+  }
+}
