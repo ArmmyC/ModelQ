@@ -423,3 +423,134 @@ fn int4_keeps_the_vocabulary_matrices_at_source_precision_by_default() {
         "quantized"
     );
 }
+
+/// A model directory holding the test source as its one checkpoint file.
+fn model_directory(dir: &TestDir) -> PathBuf {
+    let model = dir.join("model");
+    fs::create_dir_all(&model).unwrap();
+    write_source(&model.join("model.safetensors"));
+    model
+}
+
+/// Runs the quantizer with `MODELQ_PYTHON` pointing nowhere, so that a refusal
+/// is shown to come before any Python is needed.
+fn quantize_without_python(source: &Path, arguments: &[&str], output: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_modelq"))
+        .arg("quantize")
+        .arg(source)
+        .args(arguments)
+        .arg("--output")
+        .arg(output)
+        .env("MODELQ_PYTHON", "/nonexistent/python")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn calibration_is_refused_for_formats_other_than_int4() {
+    let dir = TestDir::new("calibration-format");
+    let source = dir.join("source.safetensors");
+    write_source(&source);
+    let result = quantize_without_python(
+        &source,
+        &["--format", "int8", "--calibration", "awq"],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("applies only to --format int4"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[test]
+fn calibration_needs_data_or_download_before_python_runs() {
+    let dir = TestDir::new("calibration-data");
+    let model = model_directory(&dir);
+    let result = quantize_without_python(
+        &model,
+        &["--format", "int4", "--calibration", "awq"],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("--calibration-data"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[test]
+fn missing_calibration_data_is_refused_before_python_runs() {
+    let dir = TestDir::new("calibration-missing");
+    let model = model_directory(&dir);
+    let data = dir.join("train.parquet");
+    let data_arg = data.to_string_lossy().into_owned();
+    let result = quantize_without_python(
+        &model,
+        &[
+            "--format",
+            "int4",
+            "--calibration",
+            "awq",
+            "--calibration-data",
+            &data_arg,
+        ],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("calibration data not found"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[test]
+fn an_existing_output_is_refused_before_calibration_starts() {
+    let dir = TestDir::new("calibration-exists");
+    let model = model_directory(&dir);
+    let data = dir.join("train.parquet");
+    fs::write(&data, b"").unwrap();
+    let output = dir.join("out.safetensors");
+    fs::write(&output, b"previous artifact").unwrap();
+    let data_arg = data.to_string_lossy().into_owned();
+    let result = quantize_without_python(
+        &model,
+        &[
+            "--format",
+            "int4",
+            "--calibration",
+            "awq",
+            "--calibration-data",
+            &data_arg,
+        ],
+        &output,
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("already exists"),
+        "{}",
+        stderr(&result)
+    );
+    assert_eq!(fs::read(&output).unwrap(), b"previous artifact");
+}
+
+#[test]
+fn download_applies_only_with_calibration() {
+    let dir = TestDir::new("calibration-only");
+    let source = dir.join("source.safetensors");
+    write_source(&source);
+    let result = quantize_without_python(
+        &source,
+        &["--format", "int4", "--download"],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("apply only with --calibration"),
+        "{}",
+        stderr(&result)
+    );
+}

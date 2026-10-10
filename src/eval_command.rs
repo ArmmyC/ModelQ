@@ -252,7 +252,7 @@ pub fn locate_script() -> Result<PathBuf, String> {
     }
 }
 
-fn interpreter_error(python: &OsStr, error: &std::io::Error) -> String {
+pub fn interpreter_error(python: &OsStr, error: &std::io::Error) -> String {
     if error.kind() == ErrorKind::NotFound {
         format!(
             "could not find the Python interpreter {:?}; install Python 3 with PyTorch, \

@@ -1,0 +1,106 @@
+{
+  "milestone": "ADR 0037: modelq quantize --format int4 --calibration awq reproduces ADR 0031's AWQ result",
+  "model": {
+    "id": "Qwen/Qwen2.5-0.5B",
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987"
+  },
+  "quantize": {
+    "command": "modelq quantize hf:Qwen/Qwen2.5-0.5B --format int4 --calibration awq --download --device cuda",
+    "exit_code": 0,
+    "output_bytes": 462747768,
+    "plan": [
+      "Planning: 290 source tensors, 168 quantized, 122 preserved, 458 output tensors, 462593792 data bytes"
+    ],
+    "validation": [
+      "Validation: passed (decoded 168 quantized tensors; 122 preserved tensors identical)"
+    ]
+  },
+  "provenance": {
+    "modelq.transform": "awq-v1",
+    "modelq.calibration": {
+      "dataset": {
+        "file": "wikitext-2-raw-v1/train-00000-of-00001.parquet",
+        "id": "Salesforce/wikitext",
+        "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+        "sha256": "e83889baabc497075506f91975be5fac0d45c5290b6b20582c8cd1e853d0c9f7"
+      },
+      "calibration": {
+        "alpha_grid_values": 20,
+        "batch_size": 4,
+        "group_size": 128,
+        "offsets": [
+          0,
+          81223,
+          162446,
+          243669,
+          324892,
+          406115,
+          487338,
+          568561,
+          649783,
+          731006,
+          812229,
+          893452,
+          974675,
+          1055898,
+          1137121,
+          1218344,
+          1299567,
+          1380790,
+          1462013,
+          1543236,
+          1624459,
+          1705682,
+          1786905,
+          1868128,
+          1949350,
+          2030573,
+          2111796,
+          2193019,
+          2274242,
+          2355465,
+          2436688,
+          2517911
+        ],
+        "tokens": 16384,
+        "window_length": 512,
+        "windows": 32
+      },
+      "device": "cuda",
+      "torch": "2.9.0+cu128",
+      "seconds": 79.4,
+      "search_summary": {
+        "error_reduction": 0.2732157126506687,
+        "total_error_scaled": 31420415.531211853,
+        "total_error_unscaled": 43232106.24958038
+      }
+    }
+  },
+  "eval": {
+    "command": "modelq eval --model hf:Qwen/Qwen2.5-0.5B --revision <pinned> --download --device cuda --container <output>",
+    "windows": 146,
+    "perplexity_original": 13.069886129532039,
+    "perplexity_quantized": 16.05708635670797,
+    "relative_perplexity_increase": 0.22855594896318246,
+    "mean_kl_original_to_quantized": 0.21315979392929757,
+    "top1_agreement": 0.77171068921442,
+    "matrices_replaced": 168,
+    "note": "The per-matrix relative error compares rescaled weights with the original and is not a weight error for AWQ."
+  },
+  "anchor": {
+    "adr_0031_awq_int4_embedding_kept": 16.05708635670797,
+    "measured": 16.05708635670797,
+    "difference": 0.0
+  },
+  "comparison_with_adr_0036": {
+    "default_int4_output_bytes": 462649320,
+    "default_int4_perplexity_increase": 0.3918880579050993,
+    "awq_output_bytes_difference": 98448,
+    "awq_perplexity_increase_difference_points": 16.333210894191684
+  },
+  "leftover_temporary_files": [],
+  "environment": {
+    "gpu": "NVIDIA L4",
+    "modal_seconds": 373.3
+  }
+}

@@ -11,7 +11,9 @@ use std::{
 use modelq::{
     io::{
         layout::plan_output_layout_for,
-        lowbit::{encoding_for, quantization_name, validate_outputs, write_lowbit_safetensors},
+        lowbit::{
+            encoding_for, quantization_name, validate_outputs, write_lowbit_safetensors_with,
+        },
         safetensors::TensorSource,
         sharded::SafetensorsInput,
         writer::WriterError,
@@ -25,8 +27,36 @@ use modelq::{
 
 use crate::output::OutputTarget;
 
-/// Quantizes `input` with `config` and writes the result to `target`.
-pub fn run(input: &Path, target: &OutputTarget, config: LowBitConfig) -> Result<(), String> {
+/// How the weights were prepared before quantization (ADR 0037). It is recorded in the
+/// output's metadata; the data-free default has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provenance {
+    /// The rescaling transform, for example `awq-v1`.
+    pub transform: Option<String>,
+    /// The calibration settings, as a compact JSON document.
+    pub calibration: Option<String>,
+}
+
+impl Provenance {
+    fn metadata(&self) -> Vec<(&'static str, String)> {
+        let mut entries = Vec::new();
+        if let Some(transform) = &self.transform {
+            entries.push(("modelq.transform", transform.clone()));
+        }
+        if let Some(calibration) = &self.calibration {
+            entries.push(("modelq.calibration", calibration.clone()));
+        }
+        entries
+    }
+}
+
+/// Quantizes `input` with `config` and writes the result to `target`, recording `provenance`.
+pub fn run(
+    input: &Path,
+    target: &OutputTarget,
+    config: LowBitConfig,
+    provenance: &Provenance,
+) -> Result<(), String> {
     let source = SafetensorsInput::open(input).map_err(|error| error.to_string())?;
     let summaries = source.tensor_summaries();
     let source_bytes = source
@@ -71,6 +101,9 @@ pub fn run(input: &Path, target: &OutputTarget, config: LowBitConfig) -> Result<
         plan.tensors.len(),
         plan.total_data_bytes
     );
+    if let Some(transform) = &provenance.transform {
+        println!("Calibration: {transform} (ADR 0037)");
+    }
     println!("Writing output: {}", target.describe());
 
     let mut sized: BTreeMap<String, u64> = BTreeMap::new();
@@ -78,6 +111,7 @@ pub fn run(input: &Path, target: &OutputTarget, config: LowBitConfig) -> Result<
         *sized.entry(tensor.source_name.clone()).or_default() += tensor.byte_len;
     }
     let sized: Vec<(String, u64)> = sized.into_iter().collect();
+    let extra = provenance.metadata();
     let written = target.write(&source, &sized, |subset, path| {
         let subset_summaries = subset.tensor_summaries();
         let names: BTreeSet<&str> = subset_summaries
@@ -91,7 +125,14 @@ pub fn run(input: &Path, target: &OutputTarget, config: LowBitConfig) -> Result<
             .collect();
         let subset_plan = plan_output_layout_for(&subset_summaries, &subset_decisions, encoding)
             .map_err(|error| WriterError::Layout { source: error })?;
-        write_lowbit_safetensors(subset, &subset_plan, &subset_decisions, config, path)?;
+        write_lowbit_safetensors_with(
+            subset,
+            &subset_plan,
+            &subset_decisions,
+            config,
+            path,
+            &extra,
+        )?;
         Ok::<_, WriterError>(
             subset_plan
                 .tensors

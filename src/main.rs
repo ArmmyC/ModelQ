@@ -1,3 +1,4 @@
+mod awq_command;
 mod eval_command;
 mod hub;
 mod lowbit_command;
@@ -222,7 +223,35 @@ fn build_cli() -> Command {
                         .long("device")
                         .value_name("DEVICE")
                         .value_parser(value_parser!(String))
-                        .default_value("cpu"),
+                        .default_value("cpu")
+                        .help("cpu, or with --calibration: auto, cpu or cuda"),
+                )
+                .arg(
+                    Arg::new("calibration")
+                        .long("calibration")
+                        .value_name("METHOD")
+                        .value_parser(["awq"])
+                        .help("calibrate before quantizing; awq, with --format int4 only (ADR 0037)"),
+                )
+                .arg(
+                    Arg::new("calibration-data")
+                        .long("calibration-data")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("with --calibration, a local WikiText-2 train Parquet file"),
+                )
+                .arg(
+                    Arg::new("download")
+                        .long("download")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("with --calibration, fetch the pinned WikiText-2 train split"),
+                )
+                .arg(
+                    Arg::new("python")
+                        .long("python")
+                        .value_name("PATH")
+                        .value_parser(value_parser!(PathBuf))
+                        .help("with --calibration, the Python interpreter (default: $MODELQ_PYTHON, then python)"),
                 )
                 .arg(
                     Arg::new("output")
@@ -395,6 +424,19 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                 .join("|")
         )
     })?;
+    let calibrating = matches.contains_id("calibration");
+    if calibrating && format != "int4" {
+        return Err("--calibration applies only to --format int4 (ADR 0037)".to_owned());
+    }
+    if !calibrating
+        && (matches.contains_id("calibration-data")
+            || matches.get_flag("download")
+            || matches.contains_id("python"))
+    {
+        return Err(
+            "--calibration-data, --download and --python apply only with --calibration".to_owned(),
+        );
+    }
     let has_nvfp4_options = matches.contains_id("exclude")
         || matches.contains_id("scale-search")
         || matches.get_flag("no-default-excludes");
@@ -465,12 +507,20 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                 );
             }
             let (model, output) = quantize_paths(matches)?;
-            require_cpu(matches)?;
+            let calibration = matches.get_one::<String>("calibration").cloned();
+            if calibration.is_none() {
+                require_cpu(matches)?;
+            }
             let target = output::OutputTarget::from_args(
                 output,
                 matches.get_one::<String>("max-shard-size"),
             )?;
-            let input = resolve_model_input(matches, model)?;
+            let extras: &[&str] = if calibration.is_some() {
+                CALIBRATION_EXTRAS
+            } else {
+                &[]
+            };
+            let input = resolve_model_input_with(matches, model, extras)?;
             let spec = modelq::quant::formats::find(format)
                 .ok_or_else(|| format!("unknown format {format:?}"))?;
             let bits = spec.bits;
@@ -487,7 +537,35 @@ fn run_quantize_command(matches: &ArgMatches) -> Result<(), String> {
                     modelq::quant::lowbit::Scheme::Symmetric
                 },
             };
-            lowbit_command::run(&input, &target, config)
+            match calibration {
+                None => lowbit_command::run(
+                    &input,
+                    &target,
+                    config,
+                    &lowbit_command::Provenance::default(),
+                ),
+                Some(_) => {
+                    let calibrated = awq_command::calibrate(&awq_command::Request {
+                        model_dir: &input,
+                        calibration_data: matches
+                            .get_one::<PathBuf>("calibration-data")
+                            .map(PathBuf::as_path),
+                        download: matches.get_flag("download"),
+                        group_size: config.group_size,
+                        device: matches
+                            .get_one::<String>("device")
+                            .map(String::as_str)
+                            .unwrap_or("cpu"),
+                        python: matches.get_one::<PathBuf>("python"),
+                        output: target.path(),
+                    })?;
+                    let provenance = lowbit_command::Provenance {
+                        transform: Some(awq_command::TRANSFORM.to_owned()),
+                        calibration: Some(calibrated.report_json()?),
+                    };
+                    lowbit_command::run(calibrated.checkpoint(), &target, config, &provenance)
+                }
+            }
         }
         "nvfp4" | "nvfp4-te" => {
             let (model, output) = quantize_paths(matches)?;
@@ -567,6 +645,9 @@ fn resolve_model_input_with(
 
 /// The files a GGUF export reads besides the weights.
 const GGUF_EXTRAS: &[&str] = &["config.json", "tokenizer.json", "tokenizer_config.json"];
+
+/// The files an AWQ calibration reads besides the weights.
+const CALIBRATION_EXTRAS: &[&str] = &["config.json", "tokenizer.json", "tokenizer_config.json"];
 
 fn quantize_paths(matches: &ArgMatches) -> Result<(PathBuf, PathBuf), String> {
     let input = matches
