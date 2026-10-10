@@ -6,7 +6,8 @@
 //! unquantized checkpoint and a JSON report. This module checks the arguments
 //! that need no Python, runs the script with the terminal attached, and returns
 //! the checkpoint and the report. Both are temporary files next to the output,
-//! and they are removed when the returned value is dropped.
+//! and they are removed when the returned value is dropped. A sharded model gives a
+//! temporary directory for its checkpoint instead (ADR 0038).
 
 use std::{
     ffi::OsString,
@@ -25,10 +26,12 @@ pub const DEFAULT_SCRIPT: &str = "tools/calibration/modelq_awq.py";
 pub const TRANSFORM: &str = "awq-v1";
 
 const DEVICES: [&str; 3] = ["auto", "cpu", "cuda"];
+const SINGLE_FILE: &str = "model.safetensors";
+const INDEX_FILE: &str = "model.safetensors.index.json";
 
 /// What the user asked for.
 pub struct Request<'a> {
-    /// A local model directory with one `model.safetensors`.
+    /// A local model directory: one `model.safetensors`, or an index and the shards it names.
     pub model_dir: &'a Path,
     /// A local WikiText-2 train Parquet file.
     pub calibration_data: Option<&'a Path>,
@@ -68,13 +71,55 @@ impl Calibrated {
 
 impl Drop for Calibrated {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.checkpoint);
+        // A sharded checkpoint is a directory of shards; a single file is removed on its own.
+        if self.checkpoint.is_dir() {
+            let _ = std::fs::remove_dir_all(&self.checkpoint);
+        } else {
+            let _ = std::fs::remove_file(&self.checkpoint);
+        }
         let _ = std::fs::remove_file(&self.report);
     }
 }
 
-/// Checks the request before any Python runs, so that a mistake costs nothing.
-pub fn validate(request: &Request<'_>) -> Result<(), String> {
+/// How the model's SafeTensors weights are stored (ADR 0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// One `model.safetensors`.
+    SingleFile,
+    /// An index and the shards it names, in one directory.
+    Sharded,
+}
+
+/// The layout of the weights in `model_dir`. A single file is used when it exists;
+/// otherwise the index must name shards, and every one of them must be present.
+pub fn checkpoint_layout(model_dir: &Path) -> Result<Layout, String> {
+    if model_dir.join(SINGLE_FILE).is_file() {
+        return Ok(Layout::SingleFile);
+    }
+    let index = model_dir.join(INDEX_FILE);
+    if !index.is_file() {
+        return Err(format!(
+            "{} has neither {SINGLE_FILE} nor {INDEX_FILE}; calibration reads local SafeTensors weights",
+            model_dir.display()
+        ));
+    }
+    let text = std::fs::read_to_string(&index)
+        .map_err(|error| format!("could not read {}: {error}", index.display()))?;
+    for shard in crate::hub::shard_names(&text)? {
+        if !model_dir.join(&shard).is_file() {
+            return Err(format!(
+                "{} names {shard}, which is missing from {}",
+                index.display(),
+                model_dir.display()
+            ));
+        }
+    }
+    Ok(Layout::Sharded)
+}
+
+/// Checks the request before any Python runs, so that a mistake costs nothing, and
+/// returns the layout of the model's weights.
+pub fn validate(request: &Request<'_>) -> Result<Layout, String> {
     if !DEVICES.contains(&request.device) {
         return Err(format!(
             "--device must be one of {} for --calibration, not {:?}",
@@ -97,19 +142,14 @@ pub fn validate(request: &Request<'_>) -> Result<(), String> {
         }
         _ => {}
     }
-    if !request.model_dir.join("model.safetensors").is_file() {
-        return Err(format!(
-            "{} has no model.safetensors; calibration reads one checkpoint file",
-            request.model_dir.display()
-        ));
-    }
+    let layout = checkpoint_layout(request.model_dir)?;
     if request.output.exists() {
         return Err(format!(
             "{} already exists; an existing output is never replaced",
             request.output.display()
         ));
     }
-    Ok(())
+    Ok(layout)
 }
 
 /// The calibration script: `MODELQ_AWQ_SCRIPT`, then the source-checkout location.
@@ -127,7 +167,8 @@ pub fn locate_script() -> Result<PathBuf, String> {
 }
 
 /// Temporary checkpoint and report names next to the output, unique to this run.
-fn scratch_paths(output: &Path) -> (PathBuf, PathBuf) {
+/// A sharded checkpoint is a directory, so its name has no extension.
+fn scratch_paths(output: &Path, layout: Layout) -> (PathBuf, PathBuf) {
     let directory = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -136,18 +177,19 @@ fn scratch_paths(output: &Path) -> (PathBuf, PathBuf) {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let stem = format!(".modelq-awq-{}-{stamp}", std::process::id());
-    (
-        directory.join(format!("{stem}.safetensors")),
-        directory.join(format!("{stem}.json")),
-    )
+    let checkpoint = match layout {
+        Layout::SingleFile => directory.join(format!("{stem}.safetensors")),
+        Layout::Sharded => directory.join(&stem),
+    };
+    (checkpoint, directory.join(format!("{stem}.json")))
 }
 
 /// Runs the calibration and returns its checkpoint and report.
 pub fn calibrate(request: &Request<'_>) -> Result<Calibrated, String> {
-    validate(request)?;
+    let layout = validate(request)?;
     let script = locate_script()?;
     let python = python_interpreter(request.python);
-    let (checkpoint, report) = scratch_paths(request.output);
+    let (checkpoint, report) = scratch_paths(request.output, layout);
     // Created before the run, so that a run which fails part way also cleans up.
     let calibrated = Calibrated {
         checkpoint: checkpoint.clone(),
@@ -205,15 +247,28 @@ mod tests {
 
     #[test]
     fn scratch_files_sit_next_to_the_output_and_differ() {
-        let (checkpoint, report) = scratch_paths(Path::new("out/model.safetensors"));
+        let (checkpoint, report) =
+            scratch_paths(Path::new("out/model.safetensors"), Layout::SingleFile);
         assert_eq!(checkpoint.parent(), Some(Path::new("out")));
         assert_eq!(report.parent(), Some(Path::new("out")));
         assert_ne!(checkpoint, report);
     }
 
     #[test]
+    fn a_sharded_checkpoint_is_a_directory_name_next_to_the_output() {
+        let (checkpoint, report) =
+            scratch_paths(Path::new("out/model.safetensors"), Layout::Sharded);
+        assert_eq!(checkpoint.parent(), Some(Path::new("out")));
+        assert!(checkpoint.extension().is_none(), "{}", checkpoint.display());
+        assert_eq!(
+            report.extension().and_then(|extension| extension.to_str()),
+            Some("json")
+        );
+    }
+
+    #[test]
     fn a_bare_output_name_uses_the_working_directory() {
-        let (checkpoint, _) = scratch_paths(Path::new("model.safetensors"));
+        let (checkpoint, _) = scratch_paths(Path::new("model.safetensors"), Layout::SingleFile);
         assert_eq!(checkpoint.parent(), Some(Path::new(".")));
     }
 

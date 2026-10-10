@@ -60,3 +60,7 @@ The validation record is [`adr-0037-awq-quantize-qwen2.5-0.5b.json`](../validati
 
 - The measured AWQ method is reachable from the CLI as an opt-in. Users who want better INT4 quality can ask for it.
 - Calibration needs Python with PyTorch and transformers, and about 1.7 GB of free disk next to the output while it runs.
+
+## Follow-up
+
+- Sharded checkpoints are refused by this ADR. [ADR 0038](0038-awq-sharded-checkpoints.md) accepts them, and the one-file limit in the list above is resolved there.

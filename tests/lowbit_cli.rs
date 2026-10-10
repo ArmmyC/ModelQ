@@ -554,3 +554,190 @@ fn download_applies_only_with_calibration() {
         stderr(&result)
     );
 }
+
+const FIRST_SHARD: &str = "model-00001-of-00002.safetensors";
+const SECOND_SHARD: &str = "model-00002-of-00002.safetensors";
+
+/// A sharded model directory: two shards with the tensors split between them, and the
+/// index that names them. With `skip_second`, the second shard is left out.
+fn write_sharded_model(model: &Path, skip_second: bool) {
+    fs::create_dir_all(model).unwrap();
+    write_named_source(
+        &model.join(FIRST_SHARD),
+        &[
+            (
+                "model.layers.0.input_layernorm.weight",
+                vec![8],
+                values(8, 6.0),
+            ),
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                vec![16, 128],
+                values(16 * 128, 7.0),
+            ),
+        ],
+    );
+    if !skip_second {
+        write_named_source(
+            &model.join(SECOND_SHARD),
+            &[
+                (
+                    "model.layers.0.mlp.down_proj.weight",
+                    vec![32, 128],
+                    values(32 * 128, 8.0),
+                ),
+                ("model.norm", vec![32], values(32, 9.0)),
+            ],
+        );
+    }
+    let weight_map = json!({
+        "model.layers.0.input_layernorm.weight": FIRST_SHARD,
+        "model.layers.0.self_attn.q_proj.weight": FIRST_SHARD,
+        "model.layers.0.mlp.down_proj.weight": SECOND_SHARD,
+        "model.norm": SECOND_SHARD,
+    });
+    // The payload bytes of the four F32 tensors, which the index must declare exactly.
+    let payload_bytes = (8 + 16 * 128 + 32 * 128 + 32) * 4;
+    let index = json!({"metadata": {"total_size": payload_bytes}, "weight_map": weight_map});
+    fs::write(
+        model.join("model.safetensors.index.json"),
+        index.to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_sharded_model_with_a_missing_shard_is_refused_before_python_runs() {
+    let dir = TestDir::new("sharded-missing");
+    let model = dir.join("model");
+    write_sharded_model(&model, true);
+    let data = dir.join("train.parquet");
+    fs::write(&data, b"").unwrap();
+    let data_arg = data.to_string_lossy().into_owned();
+    let result = quantize_without_python(
+        &model,
+        &[
+            "--format",
+            "int4",
+            "--calibration",
+            "awq",
+            "--calibration-data",
+            &data_arg,
+        ],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains(SECOND_SHARD),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[test]
+fn a_directory_with_no_weights_is_refused_before_python_runs() {
+    let dir = TestDir::new("no-weights");
+    let model = dir.join("model");
+    fs::create_dir_all(&model).unwrap();
+    let data = dir.join("train.parquet");
+    fs::write(&data, b"").unwrap();
+    let data_arg = data.to_string_lossy().into_owned();
+    let result = quantize_without_python(
+        &model,
+        &[
+            "--format",
+            "int4",
+            "--calibration",
+            "awq",
+            "--calibration-data",
+            &data_arg,
+        ],
+        &dir.join("out.safetensors"),
+    );
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("neither model.safetensors nor"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+/// A Python interpreter, if one is installed.
+fn python() -> Option<String> {
+    ["python3", "python"]
+        .into_iter()
+        .find(|candidate| {
+            Command::new(candidate)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+        .map(str::to_owned)
+}
+
+/// A stand-in for the calibration script. For a sharded model it copies the shards and
+/// the index to `--output`, which must be a directory, and writes a short report.
+const STUB_CALIBRATION: &str = r#"import json, pathlib, shutil, sys
+args = sys.argv[1:]
+def option(flag):
+    return pathlib.Path(args[args.index(flag) + 1])
+model, output, report = option("--model"), option("--output"), option("--report")
+if output.suffix == ".safetensors":
+    sys.exit("a sharded checkpoint is written to a directory")
+output.mkdir(parents=True, exist_ok=False)
+for path in model.iterdir():
+    if path.suffix == ".safetensors" or path.name.endswith(".index.json"):
+        shutil.copy(path, output / path.name)
+report.write_text(json.dumps({"transform": "awq-v1", "stub": True}), encoding="utf-8")
+"#;
+
+#[test]
+fn a_sharded_checkpoint_is_calibrated_as_a_directory_and_quantized() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no Python interpreter is installed");
+        return;
+    };
+    let dir = TestDir::new("sharded-calibration");
+    let model = dir.join("model");
+    write_sharded_model(&model, false);
+    let script = dir.join("stub_calibration.py");
+    fs::write(&script, STUB_CALIBRATION).unwrap();
+    let data = dir.join("train.parquet");
+    fs::write(&data, b"").unwrap();
+    let output = dir.join("out.safetensors");
+    let result = Command::new(env!("CARGO_BIN_EXE_modelq"))
+        .arg("quantize")
+        .arg(&model)
+        .args([
+            "--format",
+            "int4",
+            "--calibration",
+            "awq",
+            "--calibration-data",
+        ])
+        .arg(&data)
+        .arg("--output")
+        .arg(&output)
+        .env("MODELQ_PYTHON", &python)
+        .env("MODELQ_AWQ_SCRIPT", &script)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}{}",
+        stdout(&result),
+        stderr(&result)
+    );
+    assert!(
+        stdout(&result).contains("Calibration: awq-v1"),
+        "{}",
+        stdout(&result)
+    );
+    assert!(output.is_file());
+    let leftovers: Vec<String> = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".modelq-awq-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
