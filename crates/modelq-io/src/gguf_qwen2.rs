@@ -7,10 +7,10 @@
 //! export fails: nothing is dropped silently, and the architecture is refused
 //! unless `config.json` says `qwen2`.
 //!
-//! Two-dimensional weights become the chosen block format (ADR 0008's Q8_0 or
-//! ADR 0033's Q4_0), and one-dimensional norms and biases stay F32, as
-//! llama.cpp's own quantized conversions do. Those are the only two
-//! representations written.
+//! Two-dimensional weights become the chosen block format (ADR 0008's Q8_0, or
+//! ADR 0033's Q4_0 with the vocabulary matrices at Q8_0, as ADR 0034 decides),
+//! and one-dimensional norms and biases stay F32, as llama.cpp's own quantized
+//! conversions do. Those are the only three representations written.
 
 use std::{
     fmt,
@@ -43,7 +43,8 @@ pub const QUANTIZATION_VERSION: u32 = 2;
 pub enum WeightQuantization {
     /// 8-bit blocks with one binary16 scale per 32 values (ADR 0008, ADR 0032).
     Q8_0,
-    /// 4-bit blocks with one binary16 scale per 32 values (ADR 0033).
+    /// 4-bit blocks with one binary16 scale per 32 values (ADR 0033), except the vocabulary
+    /// matrices, which stay at 8 bits (ADR 0034).
     Q4_0,
 }
 
@@ -53,6 +54,15 @@ impl WeightQuantization {
         match self {
             Self::Q8_0 => FILE_TYPE_MOSTLY_Q8_0,
             Self::Q4_0 => FILE_TYPE_MOSTLY_Q4_0,
+        }
+    }
+
+    /// The block format of one two-dimensional tensor, by its GGUF name. Under `Q4_0` the
+    /// vocabulary matrices (the token embedding and the output head) stay at 8 bits.
+    fn for_tensor(self, gguf: &str) -> Self {
+        match self {
+            Self::Q4_0 if matches!(gguf, "token_embd.weight" | "output.weight") => Self::Q8_0,
+            other => other,
         }
     }
 
@@ -172,8 +182,10 @@ impl From<SafetensorsError> for Qwen2ExportError {
 /// Summary of one export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportReport {
-    /// Two-dimensional tensors written in the chosen block format.
-    pub quantized_tensors: usize,
+    /// Two-dimensional tensors written as Q4_0.
+    pub four_bit_tensors: usize,
+    /// Two-dimensional tensors written as Q8_0: every one under `Q8_0`, and the vocabulary matrices under `Q4_0`.
+    pub eight_bit_tensors: usize,
     /// Tensors written as F32.
     pub f32_tensors: usize,
     /// Metadata entries written.
@@ -600,7 +612,8 @@ pub fn export_qwen2(
     )?;
     let metadata_entries = file.metadata().len();
 
-    let mut quantized_tensors = 0;
+    let mut four_bit_tensors = 0;
+    let mut eight_bit_tensors = 0;
     let mut f32_tensors = 0;
     for (gguf, source_name, shape) in &mapped {
         let values: Vec<f32> = source.with_tensor(source_name, |view| view.values().collect())?;
@@ -610,14 +623,19 @@ pub fn export_qwen2(
             .map(|&dimension| u64::try_from(dimension).unwrap_or(u64::MAX))
             .collect();
         let (ggml_type, data) = if shape.len() == 2 {
-            let quantized = quantization.quantize(&values, shape).map_err(|detail| {
-                Qwen2ExportError::Quantize {
-                    name: source_name.clone(),
-                    detail,
-                }
-            })?;
-            quantized_tensors += 1;
-            (quantization.ggml_type(), quantized)
+            let format = quantization.for_tensor(gguf);
+            let quantized =
+                format
+                    .quantize(&values, shape)
+                    .map_err(|detail| Qwen2ExportError::Quantize {
+                        name: source_name.clone(),
+                        detail,
+                    })?;
+            match format {
+                WeightQuantization::Q4_0 => four_bit_tensors += 1,
+                WeightQuantization::Q8_0 => eight_bit_tensors += 1,
+            }
+            (format.ggml_type(), quantized)
         } else if shape.len() == 1 {
             f32_tensors += 1;
             (
@@ -649,7 +667,8 @@ pub fn export_qwen2(
             detail: error.to_string(),
         })?;
     Ok(ExportReport {
-        quantized_tensors,
+        four_bit_tensors,
+        eight_bit_tensors,
         f32_tensors,
         metadata_entries,
         vocab_size: hyper.vocab_size,

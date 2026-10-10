@@ -1,6 +1,6 @@
 # ADR 0033: GGUF Q4_0 Export for Qwen2, Verified with llama.cpp
 
-- Status: Accepted (Task 52, a follow-up to milestone M5 of ADR 0028). The claim is runtime-compatible for Qwen2 models in Q4_0 on CPU, with llama.cpp v0.6.0. No other architecture, quantization type, or backend is claimed. The file loads and runs, but it costs a lot of quality on the measured model (see Verification, item 5).
+- Status: Accepted (Task 52, a follow-up to milestone M5 of ADR 0028). The claim is runtime-compatible for Qwen2 models in Q4_0 on CPU, with llama.cpp v0.6.0. No other architecture, quantization type, or backend is claimed. The file loads and runs, but it costs a lot of quality on the measured model (see Verification, item 5). **Decision 2 (the tensor policy) is superseded by [ADR 0034](0034-gguf-q4-0-q8-vocabulary.md)**: the token embedding and the output head are Q8_0 in the Q4_0 export.
 - Date: 2026-10-10
 - Scope: `modelq quantize <model-dir | hf:...> --format gguf-q4_0 --output <file>.gguf`, for the `qwen2` architecture. It adds one block type to ADR 0032's writer and exporter. Metadata, tokenizer and tensor names are unchanged.
 - Builds on: [ADR 0032](0032-gguf-q8-0-export.md) (the file layout, the tensor policy, and the runtime check), [ADR 0028](0028-open-source-quantizer-scope.md) (section 5 and open question 3, which name a 4-bit type for normal users).

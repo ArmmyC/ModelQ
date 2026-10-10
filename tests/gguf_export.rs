@@ -115,6 +115,11 @@ fn tiny_tensors(extra: &[&str]) -> Vec<(String, Vec<usize>, Vec<f32>)> {
 }
 
 fn write_model(directory: &Path, model_type: &str, extra: &[&str]) {
+    write_checkpoint(directory, model_type, true, extra);
+}
+
+/// Writes a checkpoint. An untied checkpoint also has its own `lm_head.weight`.
+fn write_checkpoint(directory: &Path, model_type: &str, tied: bool, extra: &[&str]) {
     let config = json!({
         "model_type": model_type,
         "vocab_size": VOCAB,
@@ -126,7 +131,7 @@ fn write_model(directory: &Path, model_type: &str, extra: &[&str]) {
         "max_position_embeddings": 128,
         "rms_norm_eps": 1e-6,
         "rope_theta": 10000.0,
-        "tie_word_embeddings": true,
+        "tie_word_embeddings": tied,
     });
     fs::write(
         directory.join("config.json"),
@@ -152,11 +157,15 @@ fn write_model(directory: &Path, model_type: &str, extra: &[&str]) {
         serde_json::to_vec(&json!({"eos_token": "<|endoftext|>"})).unwrap(),
     )
     .unwrap();
-    fs::write(
-        directory.join("model.safetensors"),
-        safetensors(&tiny_tensors(extra)),
-    )
-    .unwrap();
+    let mut tensors = tiny_tensors(extra);
+    if !tied {
+        tensors.push((
+            "lm_head.weight".to_owned(),
+            vec![VOCAB, HIDDEN],
+            values(VOCAB * HIDDEN, 4.0),
+        ));
+    }
+    fs::write(directory.join("model.safetensors"), safetensors(&tensors)).unwrap();
 }
 
 /// The value of a `u32` metadata entry, found by its key (GGUF type 4 is `U32`).
@@ -202,7 +211,8 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q8_0_gguf_file() {
         .expect("the tiny checkpoint exports");
     // Q8_0: the embedding and seven matrices per layer. F32: the final norm, and
     // two norms and three biases per layer.
-    assert_eq!(report.quantized_tensors, 1 + 7 * LAYERS);
+    assert_eq!(report.eight_bit_tensors, 1 + 7 * LAYERS);
+    assert_eq!(report.four_bit_tensors, 0);
     assert_eq!(report.f32_tensors, 1 + 5 * LAYERS);
     assert_eq!(report.vocab_size, VOCAB);
     let bytes = fs::read(&output).unwrap();
@@ -234,12 +244,18 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q4_0_gguf_file() {
 
     let report = export_qwen2(&model, &output, WeightQuantization::Q4_0)
         .expect("the tiny checkpoint exports");
-    assert_eq!(report.quantized_tensors, 1 + 7 * LAYERS);
+    // Q4_0: the seven matrices per layer. Q8_0: the tied embedding, which is also the output head.
+    assert_eq!(report.four_bit_tensors, 7 * LAYERS);
+    assert_eq!(report.eight_bit_tensors, 1);
     assert_eq!(report.f32_tensors, 1 + 5 * LAYERS);
     let bytes = fs::read(&output).unwrap();
     assert_eq!(&bytes[..4], b"GGUF");
     assert_eq!(u32_metadata(&bytes, "general.file_type"), Some(2));
-    assert_eq!(tensor_type(&bytes, "token_embd.weight"), Some(2), "Q4_0");
+    assert_eq!(
+        tensor_type(&bytes, "token_embd.weight"),
+        Some(8),
+        "Q8_0 (ADR 0034)"
+    );
     assert_eq!(tensor_type(&bytes, "blk.1.attn_q.weight"), Some(2), "Q4_0");
     assert_eq!(
         tensor_type(&bytes, "blk.1.attn_norm.weight"),
@@ -252,6 +268,31 @@ fn a_tiny_qwen2_checkpoint_exports_to_a_q4_0_gguf_file() {
     let eight_bit = dir.join("tiny-q8.gguf");
     export_qwen2(&model, &eight_bit, WeightQuantization::Q8_0).unwrap();
     assert!(report.output_bytes < fs::metadata(&eight_bit).unwrap().len());
+}
+
+#[test]
+fn an_untied_checkpoint_keeps_its_output_head_at_eight_bits_under_q4_0() {
+    let dir = TestDir::new("untied");
+    let model = dir.join("model");
+    fs::create_dir_all(&model).unwrap();
+    write_checkpoint(&model, "qwen2", false, &[]);
+    let output = dir.join("untied.gguf");
+
+    let report = export_qwen2(&model, &output, WeightQuantization::Q4_0)
+        .expect("the untied checkpoint exports");
+    assert_eq!(
+        report.eight_bit_tensors, 2,
+        "the embedding and the output head"
+    );
+    assert_eq!(report.four_bit_tensors, 7 * LAYERS);
+    let bytes = fs::read(&output).unwrap();
+    assert_eq!(tensor_type(&bytes, "token_embd.weight"), Some(8), "Q8_0");
+    assert_eq!(tensor_type(&bytes, "output.weight"), Some(8), "Q8_0");
+    assert_eq!(
+        tensor_type(&bytes, "blk.0.ffn_down.weight"),
+        Some(2),
+        "Q4_0"
+    );
 }
 
 #[test]
