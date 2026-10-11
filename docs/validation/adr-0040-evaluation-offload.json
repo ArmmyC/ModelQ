@@ -1,0 +1,70 @@
+{
+  "milestone": "ADR 0040: modelq eval keeps one model on the device at a time",
+  "environment": {
+    "gpu": "NVIDIA L4, 22.03 GiB usable",
+    "torch": "2.9.0",
+    "rust": "1.85",
+    "modal_app": "ap-o0fEfBCgE6pYSb5VGNd3Pe"
+  },
+  "tests": {
+    "quality_eval_local": "34 passed"
+  },
+  "small_model_qwen2_5_0_5b": {
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "quantize": {
+      "exit_code": 0,
+      "bytes": 462747824
+    },
+    "evaluation_full_split": {
+      "container": "int4-0.5b",
+      "windows": 146,
+      "positions": 298862,
+      "perplexity_original": 13.069886129532039,
+      "perplexity_quantized": 16.05708635670797,
+      "relative_perplexity_increase": 0.22855594896318254,
+      "mean_kl_original_to_quantized": 0.21315979392929757,
+      "top1_agreement": 0.77171068921442,
+      "peak_device_memory_bytes": 5783068672,
+      "device": "cuda",
+      "seconds": 494.2
+    },
+    "anchor_adr_0031": 16.05708635670797,
+    "difference_from_anchor": 0.0
+  },
+  "large_model_qwen2_5_3b": {
+    "revision": "3aab1f1954e9cc14eb9509a215f9e5ca08227a9b",
+    "quantize": {
+      "exit_code": 0,
+      "bytes": 2096724536
+    },
+    "evaluation_20_windows": {
+      "container": "int4-3b",
+      "windows": 20,
+      "positions": 40940,
+      "perplexity_original": 7.834003499036884,
+      "perplexity_quantized": 11.701691859138526,
+      "relative_perplexity_increase": 0.49370521222988195,
+      "mean_kl_original_to_quantized": 0.43592022577610956,
+      "top1_agreement": 0.698143624816805,
+      "peak_device_memory_bytes": 16259285504,
+      "device": "cuda",
+      "seconds": 633.5
+    },
+    "evaluation_full_split": {
+      "container": "int4-3b",
+      "windows": 146,
+      "positions": 298862,
+      "perplexity_original": 8.030300985667864,
+      "perplexity_quantized": 12.065450350922525,
+      "relative_perplexity_increase": 0.5024904262563037,
+      "mean_kl_original_to_quantized": 0.44582197426857745,
+      "top1_agreement": 0.695842897390769,
+      "peak_device_memory_bytes": 16259285504,
+      "device": "cuda",
+      "seconds": 3205.9
+    }
+  },
+  "observation": "The 3B quantized model loses about 50% perplexity on the full split, against about 23% for the 0.5B model. The evaluation is consistent (the 0.5B anchor reproduces exactly). The cause is not yet investigated.",
+  "source_run": "modal_results/eval-offload.json",
+  "seconds": 5927.1
+}
