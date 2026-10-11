@@ -246,7 +246,7 @@ fn print_report(report: &Report<'_>) {
     }
     if report.config.scheme == Scheme::Symmetric {
         println!(
-            "  Values beyond half a group scale: {} (symmetric rounding allows none)",
+            "  Values beyond half a group scale plus float32 rounding: {} (symmetric rounding allows none)",
             report.scale_bound_violations
         );
     }

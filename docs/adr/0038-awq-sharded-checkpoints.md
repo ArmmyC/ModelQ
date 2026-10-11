@@ -54,3 +54,7 @@ A first attempt at Qwen2.5-3B on an L4 (22 GiB usable) ran out of GPU memory dur
 - AWQ reads sharded checkpoints without a change of command. The 3B model calibrates and quantizes on a 22 GiB GPU.
 - Calibration memory no longer grows with depth. Its time does, faster than linearly, because the model runs once per layer.
 - Evaluating a 3B model needs more GPU memory than an L4 offers. `modelq eval` needs a change or a larger card; that is a follow-up, not part of this decision.
+
+## Follow-up
+
+- The value beyond half a group scale in the Qwen2.5-3B run is a float32 rounding tie, not a quantization error. [ADR 0041](0041-validation-tolerance-float32.md) sets the check's tolerance to float32 rounding, and the 3B value falls inside it.

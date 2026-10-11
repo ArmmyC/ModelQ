@@ -563,8 +563,9 @@ pub struct LowBitValidation {
     pub max_abs_error: f64,
     /// Lowest per-tensor signal-to-quantization-noise ratio in dB, if defined.
     pub lowest_sqnr_db: Option<f64>,
-    /// Values whose error exceeds half their group's scale. Symmetric
-    /// rounding guarantees none; the sign scheme has no such bound.
+    /// Values whose error exceeds half their group's scale by more than the
+    /// float32 rounding of the quantizer (`lowbit::half_scale_tolerance`). Symmetric
+    /// rounding guarantees none beyond that; the sign scheme has no such bound.
     pub scale_bound_violations: u64,
 }
 
@@ -691,7 +692,7 @@ fn compare(
         signal += f64::from(reference) * f64::from(reference);
         if config.scheme == Scheme::Symmetric {
             let scale = f64::from(tensor.scales()[index / config.group_size]);
-            if error > scale / 2.0 * (1.0 + 1e-6) {
+            if error > scale / 2.0 * lowbit::half_scale_tolerance(config) {
                 report.scale_bound_violations += 1;
             }
         }
