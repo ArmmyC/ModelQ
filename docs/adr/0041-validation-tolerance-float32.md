@@ -22,7 +22,7 @@ A diagnostic traced the value to tensor `model.layers.19.mlp.up_proj.weight`. It
 
 - **Regression test.** `a_rounding_tie_from_float32_division_is_within_the_tolerance` reproduces the flagged value's arithmetic from its exact `f32` bit patterns: the quotient is 5.5, the code is 6, the error exceeds half a scale, and it lies within the tolerance.
 - **Local.** The quantizer's library tests pass (115), the I/O library tests pass (31), and the validator's integration tests pass (7). `cargo fmt --check` and clippy with `-D warnings` are clean.
-- **Linux suite (Modal, Rust 1.85).** SUITE_RESULT.
+- **Linux suite (Modal, Rust 1.85).** 376 passed, 0 failed, 2 ignored (375 before this change; the one new test is the regression test).
 - **The 3B value.** Its measured excess of 1.10e-6 lies inside the new bound of 1.67e-6, so the 3B validation should now count zero. This follows from the measured excess. The 3B quantization has not been run again to confirm it.
 - **The 0.5B runs.** They count zero before and after. A looser tolerance can only lower a count.
 
