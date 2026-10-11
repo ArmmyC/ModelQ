@@ -30,14 +30,17 @@ rules as ModelQ's INT4 (ADR 0030).
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from pathlib import Path
+from typing import Any, Callable, Iterable
 
 import torch
 
 ALPHA_GRID = tuple(index / 20 for index in range(20))
 MINIMUM_ACTIVATION = 1e-4
+INDEX_FILE = "model.safetensors.index.json"
 
 
 def round_half_away(values: Any, torch_module: Any = torch) -> Any:
@@ -143,37 +146,125 @@ def layer_prefix(layer: int) -> str:
     return f"model.layers.{layer}."
 
 
-def fold_block(tensors: dict[str, Any], blocks: list[BlockScale]) -> None:
-    """Applies the blocks' scales to a state dict in place, keeping the function unchanged.
+def rescalings(blocks: list[BlockScale]) -> dict[str, list[Callable[[Any], Any]]]:
+    """The rescalings of each tensor the blocks change, keyed by tensor name and in block order.
 
-    For A and C the RMSNorm weight is divided by s and the block's weight
-    columns multiplied by s. For D the up projection's rows are divided by s and
-    the down projection's columns multiplied by s.
+    A tensor can belong to two blocks: up_proj is a column-scaled linear of block C
+    and a row-scaled input of block D. Its rescalings apply in block order, as the
+    sequential fold always did. Each rescaling takes one checkpoint tensor and returns
+    it as float32. It depends only on that tensor and on its block's scale, so tensors
+    can be rescaled wherever they are stored, in any order (ADR 0038).
+
+    For A and C the RMSNorm weight is divided by s and the block's weight columns are
+    multiplied by s. For D the up projection's rows are divided by s and the down
+    projection's columns are multiplied by s.
     """
+    rescale: dict[str, list[Callable[[Any], Any]]] = {}
+
+    def add(name: str, step: Callable[[Any], Any]) -> None:
+        rescale.setdefault(name, []).append(step)
+
     for block in blocks:
         prefix = layer_prefix(block.layer)
         # The checkpoint tensors live on the CPU; the scale may have been computed on
         # the GPU during the search, so it is moved to match them.
         scale = block.scale.detach().to(device="cpu", dtype=torch.float32)
-        if block.block == "A":
-            norm = prefix + "input_layernorm.weight"
-            tensors[norm] = tensors[norm].to(torch.float32) / scale
+        if block.block in ("A", "C"):
+            norm = "input_layernorm.weight" if block.block == "A" else "post_attention_layernorm.weight"
+            add(prefix + norm, lambda tensor, scale=scale: tensor.to(torch.float32) / scale)
             for name in block.linears:
-                key = prefix + name + ".weight"
-                tensors[key] = tensors[key].to(torch.float32) * scale[None, :]
-        elif block.block == "C":
-            norm = prefix + "post_attention_layernorm.weight"
-            tensors[norm] = tensors[norm].to(torch.float32) / scale
-            for name in block.linears:
-                key = prefix + name + ".weight"
-                tensors[key] = tensors[key].to(torch.float32) * scale[None, :]
+                add(prefix + name + ".weight", lambda tensor, scale=scale: tensor.to(torch.float32) * scale[None, :])
         elif block.block == "D":
-            up = prefix + "mlp.up_proj.weight"
-            down = prefix + "mlp.down_proj.weight"
-            tensors[up] = tensors[up].to(torch.float32) / scale[:, None]
-            tensors[down] = tensors[down].to(torch.float32) * scale[None, :]
+            add(prefix + "mlp.up_proj.weight", lambda tensor, scale=scale: tensor.to(torch.float32) / scale[:, None])
+            add(prefix + "mlp.down_proj.weight", lambda tensor, scale=scale: tensor.to(torch.float32) * scale[None, :])
         else:
             raise ValueError(f"unknown block {block.block!r}")
+    return rescale
+
+
+def rescale_tensor(steps: list[Callable[[Any], Any]], tensor: Any) -> Any:
+    """Applies one tensor's rescalings, in block order."""
+    for step in steps:
+        tensor = step(tensor)
+    return tensor
+
+
+def _capture_block_inputs(
+    model: Any,
+    layer_index: int,
+    windows: list[list[int]],
+    device: Any,
+    batch_size: int,
+) -> dict[str, Any]:
+    """The inputs of one layer's three blocks over every window, in window order (ADR 0038).
+
+    The hooks sit on this layer only, so memory holds this layer's inputs and no others.
+    The hooks do not change the model's computation, so the inputs are the same tensors
+    that a single run over all layers would give.
+    """
+    layer = model.model.layers[layer_index]
+    watched = {
+        "attn": layer.self_attn.q_proj,
+        "mlp": layer.mlp.gate_proj,
+        "down": layer.mlp.down_proj,
+    }
+    captured: dict[str, list[Any]] = {name: [] for name in watched}
+
+    def capture(name: str):
+        def hook(_module, inputs):
+            tensor = inputs[0].detach()
+            captured[name].append(tensor.reshape(-1, tensor.shape[-1]).float())
+
+        return hook
+
+    handles = [module.register_forward_pre_hook(capture(name)) for name, module in watched.items()]
+    try:
+        with torch.no_grad():
+            for start in range(0, len(windows), batch_size):
+                batch = torch.tensor(windows[start : start + batch_size], device=device)
+                # The base model suffices: the hooks sit inside the decoder layers, and
+                # skipping the output head avoids a vocabulary-sized logits tensor. The
+                # cache setting is left at its default: turning it off changes the attention
+                # kernels on a GPU, and with them the scales (ADR 0038).
+                model.model(batch)
+    finally:
+        for handle in handles:
+            handle.remove()
+    return {name: torch.cat(parts) for name, parts in captured.items()}
+
+
+def _search_layer(index: int, layer: Any, captured: dict[str, Any], group_size: int) -> list[BlockScale]:
+    """The three blocks of one decoder layer, in the order A, C, D."""
+    return [
+        search_block(
+            index,
+            "A",
+            captured["attn"],
+            {
+                "self_attn.q_proj": layer.self_attn.q_proj.weight.detach().float(),
+                "self_attn.k_proj": layer.self_attn.k_proj.weight.detach().float(),
+                "self_attn.v_proj": layer.self_attn.v_proj.weight.detach().float(),
+            },
+            group_size,
+        ),
+        search_block(
+            index,
+            "C",
+            captured["mlp"],
+            {
+                "mlp.gate_proj": layer.mlp.gate_proj.weight.detach().float(),
+                "mlp.up_proj": layer.mlp.up_proj.weight.detach().float(),
+            },
+            group_size,
+        ),
+        search_block(
+            index,
+            "D",
+            captured["down"],
+            {"mlp.down_proj": layer.mlp.down_proj.weight.detach().float()},
+            group_size,
+        ),
+    ]
 
 
 def calibrate(
@@ -183,82 +274,21 @@ def calibrate(
     device: Any,
     batch_size: int = 4,
 ) -> list[BlockScale]:
-    """Captures each layer's block inputs on calibration windows and searches the scales.
+    """Searches the scales of every layer on the calibration windows, one layer at a time (ADR 0038).
 
     `windows` are token id lists of equal length. The activations come from the
-    unmodified float model; folding a scale leaves those activations unchanged,
-    so the search does not need to rerun the model after each block.
+    unmodified float model; folding a scale leaves those activations unchanged, so
+    the search does not need to rerun the model after each block. Each layer's inputs
+    come from a run of the model of their own, so memory holds one layer's inputs at a
+    time, not every layer's. The blocks come out in the order A, C, D for each layer,
+    as before.
     """
-    captured: dict[str, list[Any]] = {}
-    handles = []
-    layers = model.model.layers
-
-    def capture(name: str):
-        def hook(_module, inputs):
-            tensor = inputs[0].detach()
-            captured.setdefault(name, []).append(tensor.reshape(-1, tensor.shape[-1]).float())
-
-        return hook
-
-    for index, layer in enumerate(layers):
-        handles.append(layer.self_attn.q_proj.register_forward_pre_hook(capture(f"{index}.attn")))
-        handles.append(layer.mlp.gate_proj.register_forward_pre_hook(capture(f"{index}.mlp")))
-        handles.append(layer.mlp.down_proj.register_forward_pre_hook(capture(f"{index}.down")))
-
     model.eval()
-    try:
-        with torch.no_grad():
-            for start in range(0, len(windows), batch_size):
-                batch = torch.tensor(windows[start : start + batch_size], device=device)
-                # The base model suffices: the hooks sit inside the decoder layers, and
-                # skipping the output head avoids a vocabulary-sized logits tensor.
-                model.model(batch)
-    finally:
-        for handle in handles:
-            handle.remove()
-
     blocks: list[BlockScale] = []
-    for index, layer in enumerate(layers):
-        attn_inputs = torch.cat(captured[f"{index}.attn"])
-        blocks.append(
-            search_block(
-                index,
-                "A",
-                attn_inputs,
-                {
-                    "self_attn.q_proj": layer.self_attn.q_proj.weight.detach().float(),
-                    "self_attn.k_proj": layer.self_attn.k_proj.weight.detach().float(),
-                    "self_attn.v_proj": layer.self_attn.v_proj.weight.detach().float(),
-                },
-                group_size,
-            )
-        )
-        mlp_inputs = torch.cat(captured[f"{index}.mlp"])
-        blocks.append(
-            search_block(
-                index,
-                "C",
-                mlp_inputs,
-                {
-                    "mlp.gate_proj": layer.mlp.gate_proj.weight.detach().float(),
-                    "mlp.up_proj": layer.mlp.up_proj.weight.detach().float(),
-                },
-                group_size,
-            )
-        )
-        down_inputs = torch.cat(captured[f"{index}.down"])
-        blocks.append(
-            search_block(
-                index,
-                "D",
-                down_inputs,
-                {"mlp.down_proj": layer.mlp.down_proj.weight.detach().float()},
-                group_size,
-            )
-        )
-        captured.pop(f"{index}.attn")
-        captured.pop(f"{index}.mlp")
-        captured.pop(f"{index}.down")
+    for index, layer in enumerate(model.model.layers):
+        captured = _capture_block_inputs(model, index, windows, device, batch_size)
+        blocks.extend(_search_layer(index, layer, captured, group_size))
+        del captured
     return blocks
 
 
@@ -293,7 +323,7 @@ def write_scaled_checkpoint(
     destination: Any,
     metadata: dict[str, str],
 ) -> None:
-    """Writes the rescaled checkpoint: transformed tensors as F32, all others unchanged.
+    """Writes the rescaled checkpoint as one file: transformed tensors as F32, all others unchanged.
 
     `source` is an open `safetensors.safe_open` handle. Keeping the other
     tensors' dtypes means the quantized output stores the same bytes for them
@@ -301,16 +331,62 @@ def write_scaled_checkpoint(
     """
     from safetensors.torch import save_file
 
-    tensors = {name: source.get_tensor(name) for name in source.keys()}
-    transformed = set()
-    for block in blocks:
-        prefix = layer_prefix(block.layer)
-        if block.block in ("A", "C"):
-            transformed.add(prefix + ("input_layernorm.weight" if block.block == "A" else "post_attention_layernorm.weight"))
-            transformed.update(prefix + name + ".weight" for name in block.linears)
-        else:
-            transformed.update({prefix + "mlp.up_proj.weight", prefix + "mlp.down_proj.weight"})
-    fold_block(tensors, blocks)
-    for name in transformed:
-        tensors[name] = tensors[name].to(torch.float32).contiguous()
-    save_file({name: tensors[name].contiguous() for name in sorted(tensors)}, destination, metadata=metadata)
+    rescale = rescalings(blocks)
+    names = set(source.keys())
+    missing = sorted(set(rescale) - names)
+    if missing:
+        raise ValueError(f"the checkpoint has no tensor named {missing[0]!r}")
+    tensors = {}
+    for name in sorted(names):
+        tensor = source.get_tensor(name)
+        if name in rescale:
+            tensor = rescale_tensor(rescale[name], tensor)
+        tensors[name] = tensor.contiguous()
+    save_file(tensors, destination, metadata=metadata)
+
+
+def write_scaled_shards(
+    model_dir: Any,
+    blocks: list[BlockScale],
+    destination: Any,
+    metadata: dict[str, str],
+) -> list[str]:
+    """Writes the rescaled checkpoint in the layout of a sharded checkpoint (ADR 0038).
+
+    `model_dir` holds `model.safetensors.index.json` and the shards it names.
+    `destination` becomes a directory with the same shard names and the same weight
+    map, so the INT4 writer reads it as it reads any sharded checkpoint. The index's
+    total size is recomputed, because the rescaled tensors are F32. Shards are
+    rescaled one at a time, so only one source shard is held at once. Returns the
+    shard names, in order.
+    """
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    model_dir = Path(model_dir)
+    destination = Path(destination)
+    index = json.loads((model_dir / INDEX_FILE).read_text(encoding="utf-8"))
+    weight_map: dict[str, str] = index["weight_map"]
+    rescale = rescalings(blocks)
+    missing = sorted(set(rescale) - set(weight_map))
+    if missing:
+        raise ValueError(f"the index has no tensor named {missing[0]!r}")
+    shards = sorted(set(weight_map.values()))
+    destination.mkdir(parents=True, exist_ok=False)
+    total_size = 0
+    for shard in shards:
+        assigned = {name for name, owner in weight_map.items() if owner == shard}
+        tensors: dict[str, Any] = {}
+        with safe_open(model_dir / shard, framework="pt") as source:
+            if set(source.keys()) != assigned:
+                raise ValueError(f"{shard} does not hold the tensors that the index assigns to it")
+            for name in sorted(assigned):
+                tensor = source.get_tensor(name)
+                if name in rescale:
+                    tensor = rescale_tensor(rescale[name], tensor)
+                tensors[name] = tensor.contiguous()
+        total_size += sum(tensor.numel() * tensor.element_size() for tensor in tensors.values())
+        save_file(tensors, destination / shard, metadata=metadata)
+    index["metadata"] = {**index.get("metadata", {}), "total_size": total_size}
+    (destination / INDEX_FILE).write_text(json.dumps(index, indent=2), encoding="utf-8")
+    return shards

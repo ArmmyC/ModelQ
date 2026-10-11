@@ -1,5 +1,7 @@
 """Tests for the calibration CLI behind `modelq quantize --calibration awq` (ADR 0037). Nothing is downloaded."""
 
+import json
+
 import pytest
 
 import modelq_awq as cli
@@ -55,3 +57,35 @@ def test_a_model_directory_needs_one_checkpoint_file(tmp_path):
                 "--report", str(tmp_path / "r.json"),
             ]
         )
+
+
+def _write_index(directory, shards):
+    weight_map = {f"model.layers.{index}.weight": shard for index, shard in enumerate(shards)}
+    (directory / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
+
+
+def test_a_sharded_directory_is_recognized(tmp_path):
+    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    for shard in shards:
+        (tmp_path / shard).write_bytes(b"")
+    _write_index(tmp_path, shards)
+    assert cli.checkpoint_layout(tmp_path) == "sharded"
+
+
+def test_a_sharded_directory_needs_every_shard_it_names(tmp_path):
+    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    (tmp_path / shards[0]).write_bytes(b"")
+    _write_index(tmp_path, shards)
+    with pytest.raises(SystemExit, match="model-00002-of-00002.safetensors"):
+        cli.checkpoint_layout(tmp_path)
+
+
+def test_a_single_file_takes_precedence_over_an_index(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"")
+    _write_index(tmp_path, ["missing.safetensors"])
+    assert cli.checkpoint_layout(tmp_path) == "single-file"
+
+
+def test_a_directory_with_no_weights_is_refused(tmp_path):
+    with pytest.raises(SystemExit, match="neither model.safetensors nor"):
+        cli.checkpoint_layout(tmp_path)

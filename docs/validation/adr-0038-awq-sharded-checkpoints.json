@@ -1,0 +1,114 @@
+{
+  "milestone": "ADR 0038: AWQ calibration reads sharded checkpoints",
+  "environment": {
+    "gpu": "NVIDIA L4, 22.03 GiB usable",
+    "torch": "2.9.0",
+    "rust": "1.85 (Linux, Modal); 1.98 for local fmt and clippy",
+    "modal_app": "ap-HrO3nJQSiKmpqA9p8w5vqK"
+  },
+  "tests": {
+    "python_local": "23 passed",
+    "rust_workspace_linux": "375 passed, 0 failed, 2 ignored"
+  },
+  "gpu_determinism_qwen2_5_0_5b": {
+    "blocks": 72,
+    "timings_seconds": {
+      "all_at_once_first": 62.7,
+      "all_at_once_second": 63.4,
+      "one_layer_cache_off": 104.8,
+      "one_layer_cache_on": 110.8
+    },
+    "comparisons": {
+      "all_at_once_first_vs_second": {
+        "blocks_with_different_scales": 0,
+        "alpha_mismatches": 0,
+        "max_scale_difference": 0.0
+      },
+      "one_layer_cache_on_vs_all_at_once": {
+        "blocks_with_different_scales": 0,
+        "alpha_mismatches": 0,
+        "max_scale_difference": 0.0
+      },
+      "one_layer_cache_off_vs_all_at_once": {
+        "blocks_with_different_scales": 69,
+        "alpha_mismatches": 0,
+        "max_scale_difference": 1.9073486328125e-06
+      }
+    }
+  },
+  "qwen2_5_0_5b_end_to_end": {
+    "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+    "reshard": {
+      "shards": 4,
+      "tensors": 290,
+      "total_size": 988065536
+    },
+    "quantize": {
+      "single_file": {
+        "exit_code": 0,
+        "bytes": 462747824
+      },
+      "sharded": {
+        "exit_code": 0,
+        "bytes": 462747824
+      }
+    },
+    "tensor_comparison": {
+      "tensors": 458,
+      "same_names": true,
+      "identical": true,
+      "mismatches": []
+    },
+    "checkpoint_records": {
+      "single_file": {
+        "layout": "single-file",
+        "files": 1
+      },
+      "sharded": {
+        "files": 4,
+        "layout": "sharded"
+      }
+    },
+    "evaluation_full_split": {
+      "windows": 146,
+      "perplexity_original": 13.069886129532039,
+      "perplexity_quantized": 16.05708635670797,
+      "anchor_adr_0031": 16.05708635670797,
+      "difference_from_anchor": 0.0,
+      "relative_perplexity_increase": 0.22855594896318246,
+      "mean_kl_original_to_quantized": 0.21315979392929757,
+      "top1_agreement": 0.77171068921442
+    }
+  },
+  "qwen2_5_3b_two_shards": {
+    "revision": "3aab1f1954e9cc14eb9509a215f9e5ca08227a9b",
+    "shards": [
+      "model-00001-of-00002.safetensors (3.70 GB)",
+      "model-00002-of-00002.safetensors (2.05 GB)"
+    ],
+    "calibration": [
+      "AWQ calibration: 32 windows of 512 tokens on cuda, 865.0 s; report written to /tmp/awq-sharded/.modelq-awq-1461-1791670753686962190.json"
+    ],
+    "plan": [
+      "Planning: 434 source tensors, 361 quantized, 73 preserved, 795 output tensors, 2096455488 data bytes"
+    ],
+    "output_bytes": 2096724536,
+    "validation": [
+      "Validation: passed (decoded 361 quantized tensors; 73 preserved tensors identical)",
+      "Max MSE: 5.738e-1",
+      "Lowest SQNR: 10.30 dB",
+      "Values beyond half a group scale: 1 (symmetric rounding allows none)"
+    ],
+    "leftover_temporary_files": [],
+    "evaluation": {
+      "exit_code": 1,
+      "outcome": "CUDA out of memory while moving the 3B model onto the L4 (an 86 MiB allocation failed)"
+    }
+  },
+  "open_items": [
+    "Qwen2.5-3B: the report counts one value beyond half a group scale; the 0.5B runs count zero. Not investigated.",
+    "Qwen2.5-3B: modelq eval does not fit on the 22 GiB L4."
+  ],
+  "source_run": "modal_results/awq-sharded.json",
+  "seconds": 1949.4
+}

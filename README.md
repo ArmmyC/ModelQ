@@ -227,12 +227,14 @@ modelq quantize ./model.safetensors --format int2 --experimental --output ./int2
 `--calibration awq` runs activation-aware calibration before the INT4 quantizer
 ([ADR 0037](docs/adr/0037-awq-quantize.md)). It is opt-in, works with `--format int4`
 only, and needs Python with PyTorch (the same environment as `modelq eval`), plus a
-local WikiText-2 train file or `--download` for the pinned split. It writes a rescaled
-checkpoint next to the output while it runs, so it needs about 1.7 GB of free disk for
-Qwen2.5-0.5B:
+local WikiText-2 train file or `--download` for the pinned split. The input is a model
+directory, holding either one `model.safetensors` or a `model.safetensors.index.json`
+with the shards it names ([ADR 0038](docs/adr/0038-awq-sharded-checkpoints.md)). It writes
+a rescaled checkpoint next to the output while it runs, so it needs about 1.7 GB of free
+disk for Qwen2.5-0.5B:
 
 ```bash
-modelq quantize ./model.safetensors --format int4 --calibration awq --calibration-data ./wikitext-2-train.parquet --output ./int4-awq.safetensors
+modelq quantize ./model --format int4 --calibration awq --calibration-data ./wikitext-2-train.parquet --output ./int4-awq.safetensors
 ```
 
 These files are ModelQ-native. No inference runtime reads them, and none is

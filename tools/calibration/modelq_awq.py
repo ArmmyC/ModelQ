@@ -12,6 +12,8 @@ Usage (from the repository root)::
 
 With ``--download`` and no ``--calibration-data``, the pinned WikiText-2 train split is fetched and
 its SHA-256 is checked. Without either, nothing is downloaded and the script refuses to run.
+A model directory holds one ``model.safetensors``, or a ``model.safetensors.index.json`` with the
+shards it names. A sharded model takes a directory for ``--output`` and keeps its shard layout (ADR 0038).
 
 The windows are evenly spaced across the train split and recorded by offset, as in ADR 0031.
 """
@@ -40,6 +42,7 @@ CALIBRATION_WINDOWS = 32
 CALIBRATION_LENGTH = 512
 BATCH_SIZE = 4
 DEFAULT_GROUP_SIZE = 128
+SINGLE_FILE = "model.safetensors"
 
 
 def calibration_offsets(token_count: int, windows: int, length: int) -> list[int]:
@@ -81,12 +84,35 @@ def _resolve_device(torch: Any, requested: str) -> Any:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def checkpoint_layout(model_dir: pathlib.Path) -> str:
+    """`single-file` or `sharded`: how the model's SafeTensors weights are stored (ADR 0038).
+
+    A `model.safetensors` is used when it exists. Otherwise the index must name shards,
+    and every one of them must be present in the directory.
+    """
+    if (model_dir / SINGLE_FILE).is_file():
+        return "single-file"
+    index = model_dir / awq.INDEX_FILE
+    if not index.is_file():
+        raise SystemExit(
+            f"{model_dir} has neither {SINGLE_FILE} nor {awq.INDEX_FILE}; calibration reads local SafeTensors weights"
+        )
+    weight_map = json.loads(index.read_text(encoding="utf-8")).get("weight_map") or {}
+    if not weight_map:
+        raise SystemExit(f"{index} names no shards")
+    for shard in sorted(set(weight_map.values())):
+        if pathlib.Path(shard).name != shard or not (model_dir / shard).is_file():
+            raise SystemExit(f"{index} names {shard}, which is missing from {model_dir}")
+    return "sharded"
+
+
 def calibrate(
     model_dir: pathlib.Path,
     dataset: pathlib.Path,
     output: pathlib.Path,
     group_size: int,
     device_name: str,
+    layout: str,
 ) -> dict[str, Any]:
     import pyarrow.parquet as pq
     import torch
@@ -107,8 +133,13 @@ def calibrate(
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    with safe_open(model_dir / "model.safetensors", framework="pt") as source:
-        awq.write_scaled_checkpoint(source, blocks, output, {"modelq.transform": TRANSFORM})
+    metadata = {"modelq.transform": TRANSFORM}
+    if layout == "sharded":
+        files = len(awq.write_scaled_shards(model_dir, blocks, output, metadata))
+    else:
+        with safe_open(model_dir / SINGLE_FILE, framework="pt") as source:
+            awq.write_scaled_checkpoint(source, blocks, output, metadata)
+        files = 1
 
     return {
         "transform": TRANSFORM,
@@ -122,6 +153,7 @@ def calibrate(
             "batch_size": BATCH_SIZE,
             "alpha_grid_values": len(awq.ALPHA_GRID),
         },
+        "checkpoint": {"layout": layout, "files": files},
         "summary": summary,
         "device": str(device),
         "torch": torch.__version__,
@@ -134,14 +166,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=pathlib.Path, required=True, help="a local model directory")
     parser.add_argument("--calibration-data", type=pathlib.Path, help="local WikiText-2 train Parquet file")
     parser.add_argument("--download", action="store_true", help="fetch the pinned WikiText-2 train split if no file is given")
-    parser.add_argument("--output", type=pathlib.Path, required=True, help="where to write the rescaled checkpoint")
+    parser.add_argument("--output", type=pathlib.Path, required=True, help="where to write the rescaled checkpoint (a directory for a sharded model)")
     parser.add_argument("--report", type=pathlib.Path, required=True, help="where to write the JSON report")
     parser.add_argument("--group-size", type=int, default=DEFAULT_GROUP_SIZE)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     args = parser.parse_args(argv)
 
-    if not (args.model / "model.safetensors").is_file():
-        raise SystemExit(f"{args.model} is not a local model directory with a single model.safetensors")
+    layout = checkpoint_layout(args.model)
     if args.calibration_data is not None:
         dataset = args.calibration_data
     elif args.download:
@@ -151,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     if not dataset.is_file():
         raise SystemExit(f"calibration data not found: {dataset}")
 
-    report = calibrate(args.model, dataset, args.output, args.group_size, args.device)
+    report = calibrate(args.model, dataset, args.output, args.group_size, args.device, layout)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(
