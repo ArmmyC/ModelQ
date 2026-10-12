@@ -119,16 +119,40 @@ def _window_metrics(base_logits: Any, quant_logits: Any, labels: Any, torch: Any
     }
 
 
-def evaluate_pair(base_model: Any, quant_model: Any, windows: list[list[int]], torch: Any, device: Any) -> dict[str, Any]:
-    """Runs both models over every window and aggregates the three metrics."""
+def evaluate_pair(
+    base_model: Any,
+    quant_model: Any,
+    windows: list[list[int]],
+    torch: Any,
+    device: Any,
+    offload: bool = False,
+) -> dict[str, Any]:
+    """Runs both models over every window and aggregates the three metrics.
+
+    With `offload`, a model waits on the CPU except while it runs, so only one copy of a
+    large model occupies the device at a time. Moving a model copies its values exactly,
+    so the numbers do not change (ADR 0040).
+    """
     totals = {"positions": 0, "base_nll": 0.0, "quant_nll": 0.0, "kl": 0.0, "agree": 0}
     base_model.eval()
     quant_model.eval()
+    use_offload = offload and device.type != "cpu"
+
+    def logits_of(model: Any, ids: Any) -> Any:
+        if not use_offload:
+            return model(ids).logits[0, :-1]
+        model.to(device)
+        try:
+            return model(ids).logits[0, :-1]
+        finally:
+            model.to("cpu")
+            torch.cuda.empty_cache()
+
     with torch.no_grad():
         for window in windows:
             ids = torch.tensor([window], device=device)
-            base_logits = base_model(ids).logits[0, :-1]
-            quant_logits = quant_model(ids).logits[0, :-1]
+            base_logits = logits_of(base_model, ids)
+            quant_logits = logits_of(quant_model, ids)
             metrics = _window_metrics(base_logits, quant_logits, ids[0, 1:], torch)
             for key in totals:
                 totals[key] += metrics[key]

@@ -136,12 +136,16 @@ def evaluate(
     if max_windows is not None:
         windows = windows[:max_windows]
 
-    base = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32).to(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    # The models wait on the CPU between windows, so only one of them is on the device at a time (ADR 0040).
+    base = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
     variants: dict[str, Any] = {}
     for name, container in containers.items():
         quantized = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32).to(device)
         kind, substitution = mc.substitute_container(quantized, container, torch)
-        result = qe.evaluate_pair(base, quantized, windows, torch, device)
+        quantized.to("cpu")
+        result = qe.evaluate_pair(base, quantized, windows, torch, device, offload=True)
         result["relative_perplexity_increase"] = qe.relative_perplexity_increase(result)
         variants[name] = {
             "container": str(container),
@@ -162,6 +166,7 @@ def evaluate(
             "transformers": transformers.__version__,
             "device": str(device),
             "dtype": "float32",
+            "peak_device_memory_bytes": int(torch.cuda.max_memory_allocated()) if device.type == "cuda" else None,
         },
         "seconds": round(time.time() - started, 1),
     }
