@@ -73,6 +73,16 @@ impl LowBitConfig {
     }
 }
 
+/// The relative slack a symmetric reconstruction may have beyond half a group scale.
+///
+/// The quantizer divides and rounds in `f32`, and the decoded product is rounded to `f32`
+/// too. A value whose exact quotient lies just below a rounding tie can round to the farther
+/// code, so its error may exceed half a scale by up to `4 * qmax * 2^-24` of that half (ADR 0041).
+/// Only symmetric codes have this bound.
+pub fn half_scale_tolerance(config: &LowBitConfig) -> f64 {
+    1.0 + 4.0 * f64::from(config.qmax()) * f64::from(f32::EPSILON) / 2.0
+}
+
 /// Errors from the low-bit codecs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LowBitError {
@@ -779,7 +789,7 @@ mod tests {
                 for (index, (&original, &reconstructed)) in values.iter().zip(&decoded).enumerate()
                 {
                     let scale = tensor.scales()[index / group_size];
-                    let bound = scale / 2.0 * (1.0 + 1e-6);
+                    let bound = scale / 2.0 * half_scale_tolerance(&config) as f32;
                     assert!(
                         (original - reconstructed).abs() <= bound,
                         "bits {bits} group {group_size} index {index}: {original} vs {reconstructed}, scale {scale}"
@@ -787,6 +797,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_rounding_tie_from_float32_division_is_within_the_tolerance() {
+        // The value flagged by the Qwen2.5-3B check (ADR 0038): its exact quotient by the group
+        // scale lies just below 5.5, the f32 division rounds it onto the tie, and ties away from
+        // zero then pick code 6. The error exceeds half a scale, by less than the tolerance.
+        let config = symmetric(4, 128);
+        let scale = f32::from_bits(0x3cc1ab32);
+        let value = f32::from_bits(0x3e0525b2);
+        let quotient = value / scale;
+        assert_eq!(quotient, 5.5);
+        let code = quotient.round();
+        assert_eq!(code, 6.0);
+        let decoded = code * scale;
+        let error = (f64::from(value) - f64::from(decoded)).abs();
+        let half = f64::from(scale) / 2.0;
+        assert!(
+            error > half,
+            "the tie must exceed half a scale for this test to mean anything"
+        );
+        assert!(error <= half * half_scale_tolerance(&config));
     }
 
     #[test]
